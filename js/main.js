@@ -2,7 +2,8 @@
  * VOX DRIVE — drive a voxel Volvo around a plane scattered with voxel trees,
  * while two AI cars (180SX / VW) cruise on loops.
  *
- *   A: accel  S: brake  Up/Down: shift  Left/Right: steer  Mouse drag: camera
+ *   A: accel  S: brake  Space: handbrake (drift)
+ *   Up/Down: shift  Left/Right: steer  Mouse drag: camera
  */
 (function () {
   'use strict';
@@ -11,16 +12,20 @@
   const VOXEL_SCALE = 0.06;        // 1 voxel = 6 cm -> cars ~4.8 m long
   const TREE_SCALE = 0.08;
 
-  // Cars are modeled along MagicaVoxel +Y, which maps to three.js -Z.
-  // Our "forward" is +Z at yaw 0, so flip the mesh inside its group.
-  const MODEL_YAW = Math.PI;
+  // Cars are modeled along MagicaVoxel Y, which maps onto the three.js Z
+  // axis; their nose points to -Z there, matching our forward (+Z at yaw 0)
+  // without any extra yaw.
+  const MODEL_YAW = 0;
+  // The wheels only touch the ground with a few voxels (they are rounded),
+  // which reads as "hovering" — sink the cars a little into the grass.
+  const CAR_SINK = 0.14;
 
   // ------------------------------------------------------------- input ----
   const keys = {};
   let shiftUp = false, shiftDown = false;
   window.addEventListener('keydown', (e) => {
     const k = e.key;
-    if (k.startsWith('Arrow')) e.preventDefault();
+    if (k.startsWith('Arrow') || k === ' ') e.preventDefault();
     if (!e.repeat) {
       if (k === 'ArrowUp') shiftUp = true;
       if (k === 'ArrowDown') shiftDown = true;
@@ -96,10 +101,11 @@
   sun.shadow.camera.bottom = -55;
   sun.shadow.camera.near = 10;
   sun.shadow.camera.far = 220;
-  sun.shadow.bias = -0.0015;
+  sun.shadow.bias = -0.0005;
+  sun.shadow.normalBias = 0.05;
   scene.add(sun);
   scene.add(sun.target);
-  const SUN_DIR = new THREE.Vector3(55, 90, 35).normalize();
+  const SUN_DIR = new THREE.Vector3(28, 90, 18).normalize();
 
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(1400, 1400),
@@ -129,6 +135,100 @@
   const speedEl = document.getElementById('speed');
   const rpmEl = document.getElementById('rpm-fill');
   const gearEls = Array.from(document.querySelectorAll('#gears span'));
+  const driftEl = document.getElementById('drift');
+
+  // ------------------------------------------------------- tyre effects ---
+  const SKID_MAX = 460;
+  const SMOKE_MAX = 70;
+  const skidPool = [];
+  const smokePool = [];
+  let skidIdx = 0, smokeIdx = 0, smokeTimer = 0;
+  const lastSkid = { x: 1e9, z: 1e9 };
+
+  function makeSmokeTexture() {
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 64;
+    const ctx = cv.getContext('2d');
+    const g = ctx.createRadialGradient(32, 32, 4, 32, 32, 30);
+    g.addColorStop(0, 'rgba(235,235,230,0.85)');
+    g.addColorStop(1, 'rgba(235,235,230,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 64, 64);
+    return new THREE.CanvasTexture(cv);
+  }
+
+  function initFx() {
+    const skidGeo = new THREE.PlaneGeometry(0.3, 0.68);
+    for (let i = 0; i < SKID_MAX; i++) {
+      const m = new THREE.Mesh(skidGeo, new THREE.MeshBasicMaterial({ color: 0x181410, transparent: true, opacity: 0, depthWrite: false }));
+      m.rotation.order = 'YXZ';
+      m.rotation.x = -Math.PI / 2;
+      m.visible = false;
+      scene.add(m);
+      skidPool.push(m);
+    }
+    const tex = makeSmokeTexture();
+    for (let i = 0; i < SMOKE_MAX; i++) {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0, depthWrite: false }));
+      s.visible = false;
+      s.userData = { life: 0, max: 1, vx: 0, vy: 0, vz: 0 };
+      scene.add(s);
+      smokePool.push(s);
+    }
+  }
+
+  function emitTyreFx(fx, fz, sx, sz, dt) {
+    const rx = player.pos.x - fx * 1.5;   // rear axle
+    const rz = player.pos.z - fz * 1.5;
+
+    // skid marks: one pair every ~0.5 m of travel
+    const dsx = rx - lastSkid.x, dsz = rz - lastSkid.z;
+    if (dsx * dsx + dsz * dsz > 0.5 * 0.5) {
+      lastSkid.x = rx; lastSkid.z = rz;
+      for (const side of [-0.75, 0.75]) {
+        const m = skidPool[skidIdx];
+        skidIdx = (skidIdx + 1) % SKID_MAX;
+        m.position.set(rx + sx * side, 0.025 + (skidIdx % 8) * 0.0012, rz + sz * side);
+        m.rotation.y = player.heading;
+        m.material.opacity = 0.5;
+        m.visible = true;
+      }
+    }
+
+    // smoke: a puff every ~35 ms
+    smokeTimer += dt;
+    while (smokeTimer > 0.035) {
+      smokeTimer -= 0.035;
+      const s = smokePool[smokeIdx];
+      smokeIdx = (smokeIdx + 1) % SMOKE_MAX;
+      const side = Math.random() < 0.5 ? -0.75 : 0.75;
+      s.position.set(rx + sx * side + (Math.random() - 0.5) * 0.3, 0.25, rz + sz * side + (Math.random() - 0.5) * 0.3);
+      s.scale.setScalar(0.6);
+      const d = s.userData;
+      d.life = 0; d.max = 0.7 + Math.random() * 0.4;
+      d.vx = (Math.random() - 0.5) * 1.2; d.vy = 1.0 + Math.random(); d.vz = (Math.random() - 0.5) * 1.2;
+      s.visible = true;
+    }
+  }
+
+  function updateFx(dt) {
+    for (const m of skidPool) {
+      if (!m.visible) continue;
+      m.material.opacity -= dt * 0.075;
+      if (m.material.opacity <= 0) m.visible = false;
+    }
+    for (const s of smokePool) {
+      if (!s.visible) continue;
+      const d = s.userData;
+      d.life += dt;
+      if (d.life >= d.max) { s.visible = false; continue; }
+      s.position.x += d.vx * dt;
+      s.position.y += d.vy * dt;
+      s.position.z += d.vz * dt;
+      s.scale.addScalar(dt * 1.7);
+      s.material.opacity = 0.4 * (1 - d.life / d.max);
+    }
+  }
 
   // ------------------------------------------------------------- player ---
   const GEARS = [
@@ -145,12 +245,13 @@
     group: null,     // yaw
     tilt: null,      // roll / pitch (visual only)
     pos: new THREE.Vector3(0, 0, 0),
+    vel: new THREE.Vector3(0, 0, 0),
     heading: 0,
-    v: 0,
     steer: 0,
     gear: 2,         // start in 1st
     radius: 1.5,
     accSmooth: 0,
+    drifting: false,
   };
 
   const aiCars = []; // { group, loop, theta, radius }
@@ -180,12 +281,39 @@
   });
 
   // --------------------------------------------------------------- init ---
+  // Soft contact shadow that sits directly under a car at all times —
+  // the directional shadow alone lands beside the body when the sun is low.
+  let blobTex = null;
+  function makeBlobShadow() {
+    if (!blobTex) {
+      const cv = document.createElement('canvas');
+      cv.width = cv.height = 128;
+      const ctx = cv.getContext('2d');
+      const g = ctx.createRadialGradient(64, 64, 8, 64, 64, 62);
+      g.addColorStop(0, 'rgba(0,0,0,0.55)');
+      g.addColorStop(0.65, 'rgba(0,0,0,0.38)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, 128, 128);
+      blobTex = new THREE.CanvasTexture(cv);
+    }
+    const blob = new THREE.Mesh(
+      new THREE.PlaneGeometry(3.1, 5.9),
+      new THREE.MeshBasicMaterial({ map: blobTex, transparent: true, depthWrite: false })
+    );
+    blob.rotation.x = -Math.PI / 2;
+    blob.position.y = 0.015;
+    return blob;
+  }
+
   function makeCarGroup(mesh) {
     const tilt = new THREE.Group();
     mesh.rotation.y = MODEL_YAW;
+    mesh.position.y = -CAR_SINK;
     tilt.add(mesh);
     const group = new THREE.Group();
     group.add(tilt);
+    group.add(makeBlobShadow());
     scene.add(group);
     return { group, tilt };
   }
@@ -241,8 +369,10 @@
     });
 
     scatterTrees([tree1, tree2], mulberry32(20260711));
+    initFx();
 
     document.getElementById('loading').remove();
+    window.__voxDrive = { player };   // debug / test hook
     requestAnimationFrame(tick);
   }
 
@@ -255,81 +385,101 @@
 
     const throttle = !!keys['a'];
     const brake = !!keys['s'];
-    const vBefore = player.v;
+    const handbrake = !!keys[' '];
+
+    // steering (less lock at speed, extra lock while sliding for counter-steer)
+    const speedAlong = player.vel.x * Math.sin(player.heading) + player.vel.z * Math.cos(player.heading);
+    const input = (keys['arrowleft'] ? 1 : 0) - (keys['arrowright'] ? 1 : 0);
+    const lock = 0.55 / (1 + Math.abs(speedAlong) * (player.drifting ? 0.02 : 0.055));
+    player.steer += (input * lock - player.steer) * Math.min(1, dt * 7);
+    if (Math.abs(speedAlong) > 0.05) {
+      const yawGain = player.drifting ? 1.6 : 1.0;
+      player.heading += (speedAlong / 2.8) * Math.tan(player.steer) * yawGain * dt;
+    }
+
+    // decompose momentum against the (new) heading: the mismatch is wheel slip
+    const fx = Math.sin(player.heading), fz = Math.cos(player.heading);
+    const sx = -fz, sz = fx;
+    let vF = player.vel.x * fx + player.vel.z * fz;   // along the car
+    let vS = player.vel.x * sx + player.vel.z * sz;   // sideways slip
+    const vBefore = vF;
+
+    // drift state: handbrake at speed kicks the tail out, momentum keeps it out
+    player.drifting = (handbrake && Math.abs(vF) > 4) || (player.drifting && Math.abs(vS) > 1.4);
 
     if (throttle && gear.acc > 0) {
       // torque tapers off as the gear approaches its top speed
-      const t = player.v / gear.vmax;                 // >0 when moving with the gear
+      const t = vF / gear.vmax;                       // >0 when moving with the gear
       const factor = clamp(1 - Math.max(t, 0), 0, 1);
-      player.v += Math.sign(gear.vmax) * gear.acc * factor * dt;
+      vF += Math.sign(gear.vmax) * gear.acc * factor * dt;
     }
     if (brake) {
       const dec = 11 * dt;
-      player.v -= clamp(player.v, -dec, dec);
+      vF -= clamp(vF, -dec, dec);
+    }
+    if (handbrake) {
+      const dec = 6 * dt;                             // locked rear wheels scrub speed
+      vF -= clamp(vF, -dec, dec);
     }
     // rolling resistance + aero drag + engine braking when off throttle
-    const drag = 0.25 + Math.abs(player.v) * 0.012 + (throttle ? 0 : 0.9);
-    player.v -= clamp(player.v, -drag * dt, drag * dt);
+    const drag = 0.25 + Math.abs(vF) * 0.012 + (throttle ? 0 : 0.9);
+    vF -= clamp(vF, -drag * dt, drag * dt);
     // over-rev after a downshift: engine drags the car toward the gear's max
-    if (gear.acc > 0 && Math.abs(player.v) > Math.abs(gear.vmax) && Math.sign(player.v) === Math.sign(gear.vmax)) {
-      player.v += (gear.vmax - player.v) * Math.min(1, dt * 1.2);
+    if (gear.acc > 0 && Math.abs(vF) > Math.abs(gear.vmax) && Math.sign(vF) === Math.sign(gear.vmax)) {
+      vF += (gear.vmax - vF) * Math.min(1, dt * 1.2);
     }
 
-    // steering (less lock at speed)
-    const input = (keys['arrowleft'] ? 1 : 0) - (keys['arrowright'] ? 1 : 0);
-    const maxSteer = 0.55 / (1 + Math.abs(player.v) * 0.055);
-    const target = input * maxSteer;
-    player.steer += (target - player.steer) * Math.min(1, dt * 7);
-    if (Math.abs(player.v) > 0.05) {
-      player.heading += (player.v / 2.8) * Math.tan(player.steer) * dt;
-    }
+    // lateral tyre grip: strong normally, nearly gone while drifting
+    vS *= Math.exp(-(player.drifting ? 1.1 : 7.0) * dt);
+    vS -= clamp(vS, -2 * dt, 2 * dt);
 
-    const fx = Math.sin(player.heading), fz = Math.cos(player.heading);
-    player.pos.x += fx * player.v * dt;
-    player.pos.z += fz * player.v * dt;
+    player.vel.set(fx * vF + sx * vS, 0, fz * vF + sz * vS);
+    player.pos.x += player.vel.x * dt;
+    player.pos.z += player.vel.z * dt;
 
     // world bounds
-    if (Math.abs(player.pos.x) > WORLD_BOUND) { player.pos.x = clamp(player.pos.x, -WORLD_BOUND, WORLD_BOUND); player.v *= 0.4; }
-    if (Math.abs(player.pos.z) > WORLD_BOUND) { player.pos.z = clamp(player.pos.z, -WORLD_BOUND, WORLD_BOUND); player.v *= 0.4; }
+    if (Math.abs(player.pos.x) > WORLD_BOUND) { player.pos.x = clamp(player.pos.x, -WORLD_BOUND, WORLD_BOUND); player.vel.x *= -0.3; }
+    if (Math.abs(player.pos.z) > WORLD_BOUND) { player.pos.z = clamp(player.pos.z, -WORLD_BOUND, WORLD_BOUND); player.vel.z *= -0.3; }
 
-    // collisions: trees
-    for (const t of trees) {
-      const dx = player.pos.x - t.x, dz = player.pos.z - t.z;
-      const min = player.radius + t.r;
+    // collisions: push out of the obstacle and reflect the velocity off it
+    function collideCircle(cx, cz, r) {
+      const dx = player.pos.x - cx, dz = player.pos.z - cz;
+      const min = player.radius + r;
       const d2 = dx * dx + dz * dz;
-      if (d2 < min * min && d2 > 1e-6) {
-        const d = Math.sqrt(d2);
-        player.pos.x = t.x + (dx / d) * min;
-        player.pos.z = t.z + (dz / d) * min;
-        player.v *= -0.25;
+      if (d2 >= min * min || d2 < 1e-6) return;
+      const d = Math.sqrt(d2);
+      const nx = dx / d, nz = dz / d;
+      player.pos.x = cx + nx * min;
+      player.pos.z = cz + nz * min;
+      const dot = player.vel.x * nx + player.vel.z * nz;
+      if (dot < 0) {
+        player.vel.x -= 1.6 * dot * nx;
+        player.vel.z -= 1.6 * dot * nz;
+        player.vel.multiplyScalar(0.5);
       }
     }
-    // collisions: AI cars
-    for (const ai of aiCars) {
-      const dx = player.pos.x - ai.group.position.x, dz = player.pos.z - ai.group.position.z;
-      const min = player.radius + ai.radius;
-      const d2 = dx * dx + dz * dz;
-      if (d2 < min * min && d2 > 1e-6) {
-        const d = Math.sqrt(d2);
-        player.pos.x = ai.group.position.x + (dx / d) * min;
-        player.pos.z = ai.group.position.z + (dz / d) * min;
-        player.v *= -0.2;
-      }
-    }
+    for (const t of trees) collideCircle(t.x, t.z, t.r);
+    for (const ai of aiCars) collideCircle(ai.group.position.x, ai.group.position.z, ai.radius);
 
     // visuals
     player.group.position.copy(player.pos);
     player.group.rotation.y = player.heading;
-    const acc = (player.v - vBefore) / Math.max(dt, 1e-4);
+    const acc = (vF - vBefore) / Math.max(dt, 1e-4);
     player.accSmooth += (acc - player.accSmooth) * Math.min(1, dt * 5);
-    player.tilt.rotation.z = clamp(-player.steer * player.v * 0.010, -0.06, 0.06);
+    player.tilt.rotation.z = clamp(-player.steer * vF * 0.010 - vS * 0.008, -0.09, 0.09);
     player.tilt.rotation.x = clamp(player.accSmooth * 0.006, -0.05, 0.05);
 
+    // tyre effects while sliding
+    if (player.drifting && Math.abs(vS) > 1.6) {
+      emitTyreFx(fx, fz, sx, sz, dt);
+    }
+
     // HUD
-    speedEl.textContent = Math.round(Math.abs(player.v) * 3.6);
+    speedEl.textContent = Math.round(player.vel.length() * 3.6);
     gearEls.forEach((el, i) => el.classList.toggle('on', i === player.gear));
+    driftEl.classList.toggle('on', player.drifting);
     let rpm = 0.12;
-    if (player.gear !== 1) rpm = clamp(Math.abs(player.v / gear.vmax), 0, 1);
+    if (player.gear !== 1) rpm = clamp(Math.abs(vF / gear.vmax), 0, 1);
     if (keys['a'] && player.gear !== 1) rpm = Math.max(rpm, 0.3);
     rpmEl.style.width = (rpm * 100).toFixed(1) + '%';
     rpmEl.classList.toggle('red', rpm > 0.93);
@@ -376,6 +526,7 @@
     last = now;
     updatePlayer(dt);
     updateAI(dt);
+    updateFx(dt);
     updateCamera(dt);
     renderer.render(scene, camera);
     requestAnimationFrame(tick);

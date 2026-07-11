@@ -40,6 +40,12 @@
   }
   #gears span.on { background: #ffd043; color: #22303c; }
 
+  #drift {
+    margin-top: 8px; text-align: right; font-size: 14px; font-weight: 700;
+    letter-spacing: 3px; color: #ff8a3c; opacity: 0; transition: opacity 120ms;
+  }
+  #drift.on { opacity: 1; text-shadow: 0 0 8px rgba(255,120,40,0.8); }
+
   #help { left: 16px; bottom: 16px; font-size: 12.5px; line-height: 1.9; opacity: 0.92; }
   #help b {
     display: inline-block; min-width: 52px; text-align: center;
@@ -62,6 +68,7 @@
   <div id="gears">
     <span>R</span><span>N</span><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span>
   </div>
+  <div id="drift">DRIFT!</div>
 </div>
 
 <div id="help" class="panel">
@@ -69,6 +76,7 @@
   <div><b>S</b>ブレーキ</div>
   <div><b>↑ / ↓</b>シフトアップ / ダウン</div>
   <div><b>← / →</b>ハンドル</div>
+  <div><b>SPACE</b>サイドブレーキ(ドリフト)</div>
   <div><b>ドラッグ</b>カメラ視点&nbsp;&nbsp;<b>ホイール</b>ズーム</div>
 </div>
 
