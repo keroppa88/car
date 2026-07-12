@@ -24,11 +24,13 @@
   const keys = {};
   let shiftUp = false, shiftDown = false;
   window.addEventListener('keydown', (e) => {
+    AUDIO.unlock();
     const k = e.key;
     if (k.startsWith('Arrow') || k === ' ') e.preventDefault();
     if (!e.repeat) {
       if (k === 'ArrowUp') shiftUp = true;
       if (k === 'ArrowDown') shiftDown = true;
+      if (k.toLowerCase() === 'm') AUDIO.toggle();
     }
     keys[k.toLowerCase()] = true;
   });
@@ -260,6 +262,7 @@
   // ------------------------------------------------------------- camera ---
   const cam = { yaw: 0, pitch: 0.34, dist: 10, dragging: false, lastDrag: 0 };
   renderer.domElement.addEventListener('pointerdown', (e) => {
+    AUDIO.unlock();
     cam.dragging = true;
     renderer.domElement.setPointerCapture(e.pointerId);
   });
@@ -473,6 +476,17 @@
     if (player.drifting && Math.abs(vS) > 1.6) {
       emitTyreFx(fx, fz, sx, sz, dt);
     }
+
+    // sound
+    AUDIO.update(dt, {
+      gear: player.gear,
+      rpm: gear.vmax !== 0 ? clamp(Math.abs(vF / gear.vmax), 0, 1) : 0,
+      throttle,
+      slip: Math.abs(vS),
+      drifting: player.drifting,
+      brakeSkid: brake && Math.abs(vF) > 6,
+      speed: Math.abs(vF),
+    });
 
     // HUD
     speedEl.textContent = Math.round(player.vel.length() * 3.6);
