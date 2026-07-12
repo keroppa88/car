@@ -8,7 +8,9 @@
 (function () {
   'use strict';
 
-  const WORLD_BOUND = 290;         // playable half-size (m)
+  const BOUND_X_MIN = -290;        // playable area (m); extends east into the forest
+  const BOUND_X_MAX = 710;
+  const BOUND_Z = 290;
   const VOXEL_SCALE = 0.06;        // 1 voxel = 6 cm -> cars ~4.8 m long
   const TREE_SCALE = 0.08;
 
@@ -72,7 +74,7 @@
     }
     const tex = new THREE.CanvasTexture(cv);
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(90, 90);
+    tex.repeat.set(150, 88);         // square texels on the 2400x1400 ground
     tex.colorSpace = THREE.SRGBColorSpace;
     return tex;
   }
@@ -111,10 +113,11 @@
   const SUN_DIR = new THREE.Vector3(28, 90, 18).normalize();
 
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(1400, 1400),
+    new THREE.PlaneGeometry(2400, 1400),
     new THREE.MeshLambertMaterial({ map: makeGroundTexture() })
   );
   ground.rotation.x = -Math.PI / 2;
+  ground.position.x = 250;           // covers the city and the forest suburb
   ground.receiveShadow = true;
   scene.add(ground);
 
@@ -236,6 +239,44 @@
     }
   }
 
+  // ----- forest course (suburb, east of the city) -----
+  // A meandering 2-lane loop through dense woods, reached by a short
+  // connector from the east end of a city road.
+  const forestLoop = [];              // closed polyline
+  const FOREST_C = { x: 480, z: 0 };
+  const FOREST_N = 220;
+  for (let i = 0; i < FOREST_N; i++) {
+    const th = (i / FOREST_N) * Math.PI * 2;
+    const r = 150 + 45 * Math.sin(3 * th) + 25 * Math.sin(7 * th + 1.3);
+    forestLoop.push({ x: FOREST_C.x + Math.cos(th) * r, z: FOREST_C.z + Math.sin(th) * r });
+  }
+  const connector = [];               // straight link: city edge -> loop start
+  {
+    const a = { x: 322, z: H_ROADS[Math.floor(H_ROADS.length / 2)].pos };
+    const b = forestLoop[Math.floor(FOREST_N / 2)];   // west point of the loop
+    for (let i = 0; i <= 8; i++) connector.push({ x: a.x + (b.x - a.x) * i / 8, z: a.z + (b.z - a.z) * i / 8 });
+  }
+
+  function paveRoute(pts, closed) {
+    const n = closed ? pts.length : pts.length - 1;
+    for (let i = 0; i < n; i++) {
+      const p = pts[i], q = pts[(i + 1) % pts.length];
+      const dx = q.x - p.x, dz = q.z - p.z;
+      const len = Math.hypot(dx, dz);
+      const yaw = Math.atan2(dx, dz);
+      const mx = (p.x + q.x) / 2, mz = (p.z + q.z) / 2;
+      const c = Math.cos(yaw), s = Math.sin(yaw);
+      asphalt.add(mx, mz, 8, len + 3, yaw, 0.03);
+      paint.add(mx + 3.5 * c, mz - 3.5 * s, 0.15, len + 1, yaw, 0.06);   // 外側線
+      paint.add(mx - 3.5 * c, mz + 3.5 * s, 0.15, len + 1, yaw, 0.06);
+      if (i % 2 === 0) paint.add(mx, mz, 0.15, len, yaw, 0.06);          // 中央線(破線)
+    }
+  }
+  paveRoute(forestLoop, true);
+  paveRoute(connector, false);
+  patches.add(connector[0].x, connector[0].z, 10, 10, 0, 0.095);          // junction mouths
+  patches.add(connector[8].x, connector[8].z, 11, 11, Math.PI / 4, 0.095);
+
   scene.add(asphalt.build(true));
   scene.add(paint.build(false));
   scene.add(patches.build(true));
@@ -244,9 +285,12 @@
     return Math.abs((x - d.cx) * Math.cos(d.yaw) - (z - d.cz) * Math.sin(d.yaw));
   }
   function onAnyRoad(x, z, margin) {
-    for (const r of V_ROADS) if (Math.abs(x - r.pos) < r.w / 2 + margin) return true;
-    for (const r of H_ROADS) if (Math.abs(z - r.pos) < r.w / 2 + margin) return true;
+    for (const r of V_ROADS) if (Math.abs(x - r.pos) < r.w / 2 + margin && Math.abs(z) < ROAD_LEN / 2) return true;
+    for (const r of H_ROADS) if (Math.abs(z - r.pos) < r.w / 2 + margin && Math.abs(x) < ROAD_LEN / 2) return true;
     for (const d of DIAGS) if (distToDiag(x, z, d) < d.w / 2 + margin) return true;
+    const rr = (4 + margin + 3) * (4 + margin + 3);   // route samples are ~5 m apart
+    for (const p of forestLoop) if ((p.x - x) * (p.x - x) + (p.z - z) * (p.z - z) < rr) return true;
+    for (const p of connector) if ((p.x - x) * (p.x - x) + (p.z - z) * (p.z - z) < rr) return true;
     return false;
   }
 
@@ -291,7 +335,8 @@
           if (bad) continue;
 
           let mesh;
-          if (voxMeshes && voxMeshes.length) {
+          // vox の建物があっても箱と混ぜて配置する
+          if (voxMeshes && voxMeshes.length && cityRnd() < 0.6) {
             mesh = voxMeshes[Math.floor(cityRnd() * voxMeshes.length)].clone();
           } else {
             const geo = new THREE.BoxGeometry(w, h, d2);
@@ -502,30 +547,65 @@
   }
 
   function scatterTrees(meshes, rnd) {
-    const COUNT = 60;
-    let placed = 0;
-    let attempts = 0;
-    while (placed < COUNT && attempts++ < 6000) {
-      const x = (rnd() * 2 - 1) * (WORLD_BOUND + 20);
-      const z = (rnd() * 2 - 1) * (WORLD_BOUND + 20);
-      if (onAnyRoad(x, z, 3)) continue;                      // keep off the streets
-      let near = false;
-      for (const o of obstacles) {
-        const rr = o.r + 4;
-        if ((o.x - x) * (o.x - x) + (o.z - z) * (o.z - z) < rr * rr) { near = true; break; }
-      }
-      if (near) continue;
+    // Instancing keeps draw calls low, but one huge InstancedMesh defeats
+    // frustum culling — so the forest is split into sectors around the loop.
+    const SECTORS = 12;
+    const cityLists = meshes.map(() => []);
+    const sectorLists = [];
+    for (let i = 0; i < SECTORS; i++) sectorLists.push(meshes.map(() => []));
 
-      const src = meshes[Math.floor(rnd() * meshes.length)];
-      const tree = src.clone();
+    function tryPlace(lists, x, z, roadMargin, spacing) {
+      if (onAnyRoad(x, z, roadMargin)) return false;
+      for (const o of obstacles) {
+        const rr = o.r + spacing;
+        if ((o.x - x) * (o.x - x) + (o.z - z) * (o.z - z) < rr * rr) return false;
+      }
       const s = 0.75 + rnd() * 0.6;
-      tree.scale.setScalar(s);
-      tree.position.set(x, 0, z);
-      tree.rotation.y = rnd() * Math.PI * 2;
-      scene.add(tree);
+      lists[Math.floor(rnd() * meshes.length)].push({ x, z, s, rot: rnd() * Math.PI * 2 });
       obstacles.push({ x, z, r: 0.9 * s });
-      placed++;
+      return true;
     }
+
+    // sparse trees around the city
+    let placed = 0, attempts = 0;
+    while (placed < 60 && attempts++ < 6000) {
+      const x = -310 + rnd() * 620;
+      const z = (rnd() * 2 - 1) * 310;
+      if (tryPlace(cityLists, x, z, 3, 4)) placed++;
+    }
+    // dense woods hugging the forest course
+    placed = 0; attempts = 0;
+    while (placed < 220 && attempts++ < 20000) {
+      const p = forestLoop[Math.floor(rnd() * forestLoop.length)];
+      const ang = rnd() * Math.PI * 2;
+      const d = 7 + rnd() * 55;
+      const x = p.x + Math.cos(ang) * d;
+      const z = p.z + Math.sin(ang) * d;
+      if (x < 330 || x > BOUND_X_MAX || Math.abs(z) > BOUND_Z) continue;
+      const sector = Math.floor(((Math.atan2(z - FOREST_C.z, x - FOREST_C.x) + Math.PI) / (Math.PI * 2)) * SECTORS) % SECTORS;
+      if (tryPlace(sectorLists[sector], x, z, 2.5, 2.5)) placed++;
+    }
+
+    const m4 = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0);
+    function buildInstanced(mesh, list) {
+      if (!list.length) return;
+      const inst = new THREE.InstancedMesh(mesh.geometry, mesh.material, list.length);
+      list.forEach((p, i) => {
+        q.setFromAxisAngle(up, p.rot);
+        m4.compose(new THREE.Vector3(p.x, 0, p.z), q, new THREE.Vector3(p.s, p.s, p.s));
+        inst.setMatrixAt(i, m4);
+      });
+      inst.computeBoundingSphere();
+      inst.castShadow = true;
+      inst.receiveShadow = true;
+      scene.add(inst);
+    }
+    meshes.forEach((mesh, t) => {
+      buildInstanced(mesh, cityLists[t]);
+      for (const lists of sectorLists) buildInstanced(mesh, lists[t]);
+    });
   }
 
   // Waypoints for a rectangular circuit over the grid, shifted into the
@@ -565,12 +645,26 @@
     player.pos.set(spawnRoad.pos + LANE_OFF, 0, 30);
     player.heading = 0;
 
+    // waypoints along a sampled route, shifted into the left lane
+    function routeWps(pts, step) {
+      const wps = [];
+      for (let i = 0; i < pts.length; i += step) {
+        const p = pts[i], q = pts[(i + step) % pts.length];
+        const dx = q.x - p.x, dz = q.z - p.z;
+        const l = Math.hypot(dx, dz) || 1;
+        wps.push({ x: p.x + (dz / l) * LANE_OFF, z: p.z - (dx / l) * LANE_OFF });
+      }
+      return wps;
+    }
+
     const vLast = V_ROADS.length - 1, hLast = H_ROADS.length - 1;
     const loops = [
       { wps: rectLoop(V_ROADS[1].pos, V_ROADS[Math.min(2, vLast)].pos, H_ROADS[1].pos, H_ROADS[Math.min(2, hLast)].pos, true), base: 8 },
       { wps: rectLoop(V_ROADS[0].pos, V_ROADS[vLast].pos, H_ROADS[0].pos, H_ROADS[hLast].pos, false), base: 11 },
+      { wps: routeWps(forestLoop, 5), base: 12 },
+      { wps: rectLoop(V_ROADS[Math.min(2, vLast)].pos, V_ROADS[vLast].pos, H_ROADS[0].pos, H_ROADS[Math.min(2, hLast)].pos, true), base: 9 },
     ];
-    const aiMeshes = [nissan, vw];
+    const aiMeshes = [nissan, vw, nissan.clone(), vw.clone()];
     loops.forEach((loop, i) => {
       const g = makeCarGroup(aiMeshes[i]);
       const start = loop.wps[0];
@@ -656,8 +750,11 @@
     player.pos.z += player.vel.z * dt;
 
     // world bounds
-    if (Math.abs(player.pos.x) > WORLD_BOUND) { player.pos.x = clamp(player.pos.x, -WORLD_BOUND, WORLD_BOUND); player.vel.x *= -0.3; }
-    if (Math.abs(player.pos.z) > WORLD_BOUND) { player.pos.z = clamp(player.pos.z, -WORLD_BOUND, WORLD_BOUND); player.vel.z *= -0.3; }
+    if (player.pos.x < BOUND_X_MIN || player.pos.x > BOUND_X_MAX) {
+      player.pos.x = clamp(player.pos.x, BOUND_X_MIN, BOUND_X_MAX);
+      player.vel.x *= -0.3;
+    }
+    if (Math.abs(player.pos.z) > BOUND_Z) { player.pos.z = clamp(player.pos.z, -BOUND_Z, BOUND_Z); player.vel.z *= -0.3; }
 
     // collisions: push out of the obstacle and reflect the velocity off it
     function collideCircle(cx, cz, r) {
@@ -718,7 +815,7 @@
     for (const ai of aiCars) {
       const wp = ai.wps[ai.idx];
       const dx = wp.x - ai.pos.x, dz = wp.z - ai.pos.z;
-      if (dx * dx + dz * dz < 3.5 * 3.5) ai.idx = (ai.idx + 1) % ai.wps.length;
+      if (dx * dx + dz * dz < 6 * 6) ai.idx = (ai.idx + 1) % ai.wps.length;
 
       let diff = Math.atan2(dx, dz) - ai.heading;
       while (diff > Math.PI) diff -= Math.PI * 2;
