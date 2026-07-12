@@ -62,13 +62,14 @@ python3 -m http.server 8000
 
 サウンドは Web Audio API によるリアルタイム生成(音声ファイル不使用)。エンジン音はギアごとに音域が決まっており、回転数と共にピッチが上がります(1速は低音、上のギアほど高音域)。ドリフトや急ブレーキではタイヤのスキール音が鳴ります。
 
-## カスタムマップ(glTF / GLB)
+## マップ
 
-自動生成マップの代わりに、Blender などで作った glTF マップを読み込める。
+**デフォルトは日本橋(`nihonbashi.gltf`)。** URL パラメータで切り替えられる:
 
 ```
-http://localhost:8000/?map=maps/sample.glb
-http://localhost:8000/?map=nihonbashi.gltf
+http://localhost:8000/                        … 日本橋(デフォルト)
+http://localhost:8000/?map=city              … 自動生成の街 + 森 + 信号
+http://localhost:8000/?map=maps/sample.glb   … 任意の glTF/GLB マップ
 ```
 
 同梱の `maps/sample.glb` が命名規則のサンプル。`nihonbashi.gltf` のような
