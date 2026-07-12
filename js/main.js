@@ -220,9 +220,11 @@
   }
 
   // Plain asphalt patches hide the markings inside every intersection.
+  const signals = [];                 // signalized grid intersections
   for (const v of V_ROADS) {
     for (const h of H_ROADS) {
       patches.add(v.pos, h.pos, v.w, h.w, 0, 0.09);
+      signals.push({ x: v.pos, z: h.pos, vw: v.w, hw: h.w });
     }
   }
   for (const d of DIAGS) {
@@ -280,6 +282,118 @@
   scene.add(asphalt.build(true));
   scene.add(paint.build(false));
   scene.add(patches.build(true));
+
+  // ----- traffic signals -----
+  // Two-phase controller shared by every grid intersection:
+  //   NS (vertical roads): green 8 s -> yellow 3 s -> red 11 s
+  //   EW (horizontal roads): the opposite — red while NS is green/yellow.
+  const SIG_CYCLE = 22;
+  function signalState(axis, timeSec) {
+    const local = axis === 0 ? timeSec % SIG_CYCLE : (timeSec + 11) % SIG_CYCLE;
+    if (local < 8) return 'g';
+    if (local < 11) return 'y';
+    return 'r';
+  }
+
+  const LAMP_BRIGHT = {
+    g: new THREE.MeshBasicMaterial({ color: 0x00c878 }),
+    y: new THREE.MeshBasicMaterial({ color: 0xffc400 }),
+    r: new THREE.MeshBasicMaterial({ color: 0xff4438 }),
+  };
+  const LAMP_DIM = {};
+  for (const k of ['g', 'y', 'r']) {
+    LAMP_DIM[k] = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(LAMP_BRIGHT[k].color).multiplyScalar(0.13),
+    });
+  }
+  const lampMeshes = [];              // {mesh, color, axis}
+  {
+    const poleGeo = new THREE.CylinderGeometry(0.09, 0.09, 5.6, 6);
+    const poleMat = new THREE.MeshLambertMaterial({ color: 0x555a5e });
+    const boxGeo = new THREE.BoxGeometry(2.0, 0.66, 0.24);
+    const boxMat = new THREE.MeshLambertMaterial({ color: 0x2c2f33 });
+    const lampGeo = new THREE.CircleGeometry(0.22, 12);
+    for (const s of signals) {
+      const g = new THREE.Group();
+      g.position.set(s.x + s.vw / 2 + 1.2, 0, s.z + s.hw / 2 + 1.2);
+      const pole = new THREE.Mesh(poleGeo, poleMat);
+      pole.position.y = 2.8;
+      g.add(pole);
+      // one horizontal 青黄赤 box per axis, lamps on both faces
+      [{ axis: 0, y: 5.2, yaw: 0 }, { axis: 1, y: 4.3, yaw: Math.PI / 2 }].forEach((cfg) => {
+        const holder = new THREE.Group();
+        holder.position.y = cfg.y;
+        holder.rotation.y = cfg.yaw;
+        holder.add(new THREE.Mesh(boxGeo, boxMat));
+        [['g', -0.63], ['y', 0], ['r', 0.63]].forEach(([color, lx]) => {
+          for (const face of [1, -1]) {
+            const lamp = new THREE.Mesh(lampGeo, LAMP_DIM[color]);
+            lamp.position.set(lx, 0, 0.13 * face);
+            if (face < 0) lamp.rotation.y = Math.PI;
+            holder.add(lamp);
+            lampMeshes.push({ mesh: lamp, color, axis: cfg.axis });
+          }
+        });
+        g.add(holder);
+      });
+      scene.add(g);
+    }
+  }
+
+  const sigWinEl = document.getElementById('signal');
+  const sigLampEls = { g: document.getElementById('sig-g'), y: document.getElementById('sig-y'), r: document.getElementById('sig-r') };
+  let lastSigStates = ['', ''];
+
+  function updateSignals(timeSec) {
+    const states = [signalState(0, timeSec), signalState(1, timeSec)];
+    if (states[0] !== lastSigStates[0] || states[1] !== lastSigStates[1]) {
+      lastSigStates = states;
+      for (const l of lampMeshes) {
+        l.mesh.material = states[l.axis] === l.color ? LAMP_BRIGHT[l.color] : LAMP_DIM[l.color];
+      }
+    }
+
+    // HUD window: show the player's own signal when nearing an intersection
+    const fx = Math.sin(player.heading), fz = Math.cos(player.heading);
+    let best = null;
+    for (const s of signals) {
+      const dx = s.x - player.pos.x, dz = s.z - player.pos.z;
+      const ahead = dx * fx + dz * fz;
+      const lat = Math.abs(dx * fz - dz * fx);
+      if (lat > 10 || ahead < -6 || ahead > 55) continue;
+      if (!best || ahead < best.ahead) best = { ahead };
+    }
+    if (best) {
+      const axis = Math.abs(fx) > Math.abs(fz) ? 1 : 0;
+      const st = states[axis];
+      sigWinEl.style.display = 'flex';
+      for (const k of ['g', 'y', 'r']) sigLampEls[k].classList.toggle('on', st === k);
+    } else {
+      sigWinEl.style.display = 'none';
+    }
+    return states;
+  }
+
+  // Distance to the stop line of a red/yellow signal ahead of an AI car,
+  // or Infinity when the way is clear.
+  function aiStopDistance(ai, states) {
+    const fx = Math.sin(ai.heading), fz = Math.cos(ai.heading);
+    const axis = Math.abs(fx) > Math.abs(fz) ? 1 : 0;
+    if (states[axis] === 'g') return Infinity;
+    let stop = Infinity;
+    for (const s of signals) {
+      const dx = s.x - ai.pos.x, dz = s.z - ai.pos.z;
+      const ahead = dx * fx + dz * fz;
+      const lat = Math.abs(dx * fz - dz * fx);
+      if (lat > 8 || ahead < 0 || ahead > 32) continue;
+      const crossHalf = axis === 0 ? s.hw / 2 : s.vw / 2;
+      const line = ahead - crossHalf - 3;
+      if (line < -1) continue;                        // already in the box: clear it
+      if (states[axis] === 'y' && line < 3) continue; // yellow, too late to stop
+      stop = Math.min(stop, line);
+    }
+    return stop;
+  }
 
   function distToDiag(x, z, d) {
     return Math.abs((x - d.cx) * Math.cos(d.yaw) - (z - d.cz) * Math.sin(d.yaw));
@@ -811,7 +925,7 @@
     rpmEl.classList.toggle('red', rpm > 0.93);
   }
 
-  function updateAI(dt) {
+  function updateAI(dt, sigStates) {
     for (const ai of aiCars) {
       const wp = ai.wps[ai.idx];
       const dx = wp.x - ai.pos.x, dz = wp.z - ai.pos.z;
@@ -823,8 +937,15 @@
       ai.heading += clamp(diff, -1.7 * dt, 1.7 * dt);
 
       // slow down for corners
-      const target = ai.base * (1 - 0.72 * Math.min(1, Math.abs(diff) * 1.4));
-      ai.v += (target - ai.v) * Math.min(1, dt * 1.6);
+      let target = ai.base * (1 - 0.72 * Math.min(1, Math.abs(diff) * 1.4));
+      // obey the signals: brake to a halt at the stop line on red/yellow
+      const stop = aiStopDistance(ai, sigStates);
+      let rate = 1.6;
+      if (stop < 22) {
+        target = Math.min(target, Math.max(0, (stop - 1.5) * 0.7));
+        rate = 3.5;
+      }
+      ai.v += (target - ai.v) * Math.min(1, dt * rate);
       ai.pos.x += Math.sin(ai.heading) * ai.v * dt;
       ai.pos.z += Math.cos(ai.heading) * ai.v * dt;
 
@@ -859,8 +980,9 @@
   function tick(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
+    const sigStates = updateSignals(now / 1000);
     updatePlayer(dt);
-    updateAI(dt);
+    updateAI(dt, sigStates);
     updateFx(dt);
     updateCamera(dt);
     renderer.render(scene, camera);

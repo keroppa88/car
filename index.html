@@ -46,6 +46,21 @@
   }
   #drift.on { opacity: 1; text-shadow: 0 0 8px rgba(255,120,40,0.8); }
 
+  /* 接近中の交差点の信号(自分の進行方向) */
+  #signal {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    z-index: 5; display: none; gap: 12px; align-items: center;
+    background: rgba(16, 22, 28, 0.82); border: 2px solid #3a4046;
+    border-radius: 999px; padding: 9px 16px;
+  }
+  #signal .slamp {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: #23282c; transition: background 120ms, box-shadow 120ms;
+  }
+  #sig-g.on { background: #00c878; box-shadow: 0 0 14px #00c878; }
+  #sig-y.on { background: #ffc400; box-shadow: 0 0 14px #ffc400; }
+  #sig-r.on { background: #ff4438; box-shadow: 0 0 14px #ff4438; }
+
   #help { left: 16px; bottom: 16px; font-size: 12.5px; line-height: 1.9; opacity: 0.92; }
   #help b {
     display: inline-block; min-width: 52px; text-align: center;
@@ -61,6 +76,12 @@
 <div id="loading">LOADING&hellip; 車を組み立て中</div>
 
 <div id="title" class="panel">VOX DRIVE<small>Volvoで走り回ろう</small></div>
+
+<div id="signal">
+  <div class="slamp" id="sig-g"></div>
+  <div class="slamp" id="sig-y"></div>
+  <div class="slamp" id="sig-r"></div>
+</div>
 
 <div id="meter" class="panel">
   <span id="speed">0</span><span id="speed-unit">km/h</span>
