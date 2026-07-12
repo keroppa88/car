@@ -12,16 +12,25 @@
 (function (global) {
   'use strict';
 
-  // [min Hz, max Hz] per gear index: R, N, 1, 2, 3, 4, 5
-  const FREQS = [
-    [50, 120],   // R — low, like 1st
-    [42, 95],    // N — revs freely with the throttle
-    [40, 95],    // 1 — かなり低く
-    [65, 165],   // 2
-    [90, 235],   // 3
-    [115, 305],  // 4
-    [140, 385],  // 5
-  ];
+  // [min Hz, max Hz] per gear index: R, N, 1, 2, 3, 4, 5.
+  // 回転数を上げると音階が上がり、ギアを上げると音域ごと上がる。
+  // 隣接ギアは「前のギアの真ん中の回転域の音階 = 次のギアの低い回転域の音階」
+  // となるよう連鎖させる (fLow[n+1] = fMid[n])。
+  //   1: 40-95  (かなり低く)   mid 67.5
+  //   2: 67.5-147.5            mid 107.5
+  //   3: 107.5-217.5           mid 162.5
+  //   4: 162.5-312.5           mid 237.5
+  //   5: 237.5-437.5
+  const FREQS = (() => {
+    const widths = [55, 80, 110, 150, 200];   // 1速〜5速の音域幅
+    let lo = 40;
+    const bands = [];
+    for (const w of widths) {
+      bands.push([lo, lo + w]);
+      lo += w / 2;                            // 次のギアは真ん中の音から始まる
+    }
+    return [bands[0], bands[0], ...bands];    // R と N は1速と同じ低い音域
+  })();
 
   let ctx = null;
   let master, engGain, filt, osc1, osc2, oscSub, screechGain, bp1, bp2;
@@ -149,6 +158,7 @@
 
   global.AUDIO = {
     unlock, toggle, update,
+    bands: FREQS,
     _debug() {
       return ctx ? {
         state: ctx.state,
