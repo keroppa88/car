@@ -16,9 +16,9 @@
   // axis; their nose points to -Z there, matching our forward (+Z at yaw 0)
   // without any extra yaw.
   const MODEL_YAW = 0;
-  // The wheels only touch the ground with a few voxels (they are rounded),
-  // which reads as "hovering" — sink the cars a little into the grass.
-  const CAR_SINK = 0.14;
+  // Rest the tyres exactly on the ground; the tiny extra sink only closes
+  // the light gap at glancing angles (the contact shadow does the rest).
+  const CAR_SINK = 0.02;
 
   // ------------------------------------------------------------- input ----
   const keys = {};
