@@ -90,7 +90,8 @@
   scene.background = new THREE.Color(SKY);
   scene.fog = new THREE.Fog(SKY, 130, 480);
 
-  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1200);
+  // near=0.5 keeps enough depth precision at 300 m for the thin road layers
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.5, 1200);
 
   const hemi = new THREE.HemisphereLight(0xdff3ff, 0x5a7a45, 0.95);
   scene.add(hemi);
@@ -117,20 +118,200 @@
   ground.receiveShadow = true;
   scene.add(ground);
 
-  // Dirt rings marking the AI cruise loops.
-  const AI_LOOPS = [
-    { r: 45, dir: 1, speed: 8.5 },
-    { r: 75, dir: -1, speed: 11.5 },
-  ];
-  for (const loop of AI_LOOPS) {
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(loop.r - 2.4, loop.r + 2.4, 96),
-      new THREE.MeshLambertMaterial({ color: 0x96795a })
-    );
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 0.02;
-    ring.receiveShadow = true;
-    scene.add(ring);
+  // ---------------------------------------------------------------- city ---
+  // Procedural street grid: vertical/horizontal roads (occasionally one
+  // diagonal), Japanese-style white lines, blocks with 2 or 4 buildings.
+  //
+  // Two road widths:
+  //   4-lane (two each way, w=14): solid center line, dashed lane dividers,
+  //                                solid edge lines
+  //   2-lane (one each way,  w=8): dashed center line, solid edge lines
+  const ROAD_LEN = 660;               // roads span the whole map
+  const LANE_OFF = 1.75;              // AI keeps to the left lane (Japan)
+
+  // のちに vox の建物を使う場合はここにファイルを追加(モデルの前面 = +Z)。
+  // 空の間はプレースホルダーの箱を配置する。
+  const BUILDING_VOX = [];
+
+  const obstacles = [];               // {x,z,r} buildings + trees, for collision
+
+  // Batches all flat rectangles of one color into a single mesh.
+  function QuadBatch(color) {
+    this.pos = [];
+    this.idx = [];
+    this.color = color;
+  }
+  QuadBatch.prototype.add = function (cx, cz, w, l, yaw, y) {
+    const c = Math.cos(yaw), s = Math.sin(yaw);
+    const base = this.pos.length / 3;
+    for (const [x, z] of [[-w / 2, -l / 2], [w / 2, -l / 2], [w / 2, l / 2], [-w / 2, l / 2]]) {
+      this.pos.push(cx + x * c + z * s, y, cz - x * s + z * c);
+    }
+    this.idx.push(base, base + 2, base + 1, base, base + 3, base + 2);
+  };
+  QuadBatch.prototype.build = function (receiveShadow) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
+    geo.setIndex(this.idx);
+    geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: this.color }));
+    mesh.receiveShadow = !!receiveShadow;
+    return mesh;
+  };
+
+  const cityRnd = mulberry32(424242);
+  function genRoadLine() {
+    const arr = [];
+    let p = -250 + cityRnd() * 30;
+    while (p < 260) {
+      const four = cityRnd() < 0.4;
+      arr.push({ pos: p, w: four ? 14 : 8, four });
+      p += 95 + cityRnd() * 55;
+    }
+    if (!arr.some((r) => r.four)) { arr[1].four = true; arr[1].w = 14; }
+    return arr;
+  }
+  const V_ROADS = genRoadLine();      // roads running along z, at x = pos
+  const H_ROADS = genRoadLine();      // roads running along x, at z = pos
+  // たまに斜めの道路(このシードでは1本、45°)
+  const DIAGS = [];
+  if (cityRnd() < 0.8) {
+    DIAGS.push({ cx: -40 + cityRnd() * 80, cz: -40 + cityRnd() * 80, yaw: Math.PI / 4, w: 8, four: false });
+  }
+
+  const asphalt = new QuadBatch(0x3d3d42);
+  const paint = new QuadBatch(0xe8e8e2);
+  const patches = new QuadBatch(0x3d3d42);
+
+  // Lane markings for one road, in the road's local frame (length along z).
+  function addMarkings(cx, cz, yaw, road) {
+    const c = Math.cos(yaw), s = Math.sin(yaw);
+    const at = (off, w, l, zc) => paint.add(cx + off * c + zc * s, cz - off * s + zc * c, w, l, yaw, 0.06);
+    const edge = road.four ? 6.2 : 3.5;
+    at(edge, 0.15, ROAD_LEN, 0);      // 外側線(実線)
+    at(-edge, 0.15, ROAD_LEN, 0);
+    if (road.four) {
+      at(0, 0.15, ROAD_LEN, 0);       // 中央線(実線)
+      for (let z = -ROAD_LEN / 2; z < ROAD_LEN / 2; z += 8) {  // 車線境界線(破線)
+        at(3.1, 0.15, 4, z + 2);
+        at(-3.1, 0.15, 4, z + 2);
+      }
+    } else {
+      for (let z = -ROAD_LEN / 2; z < ROAD_LEN / 2; z += 10) { // 中央線(破線)
+        at(0, 0.15, 5, z + 2.5);
+      }
+    }
+  }
+
+  for (const r of V_ROADS) {
+    asphalt.add(r.pos, 0, r.w, ROAD_LEN, 0, 0.03);
+    addMarkings(r.pos, 0, 0, r);
+  }
+  for (const r of H_ROADS) {
+    asphalt.add(0, r.pos, r.w, ROAD_LEN, Math.PI / 2, 0.03);
+    addMarkings(0, r.pos, Math.PI / 2, r);
+  }
+  for (const d of DIAGS) {
+    asphalt.add(d.cx, d.cz, d.w, ROAD_LEN * 1.35, d.yaw, 0.03);
+    addMarkings(d.cx, d.cz, d.yaw, d);
+  }
+
+  // Plain asphalt patches hide the markings inside every intersection.
+  for (const v of V_ROADS) {
+    for (const h of H_ROADS) {
+      patches.add(v.pos, h.pos, v.w, h.w, 0, 0.09);
+    }
+  }
+  for (const d of DIAGS) {
+    const dirx = Math.sin(d.yaw), dirz = Math.cos(d.yaw);
+    for (const v of V_ROADS) {
+      const t = (v.pos - d.cx) / dirx;
+      const z = d.cz + t * dirz;
+      if (Math.abs(z) < 320) patches.add(v.pos, z, d.w, v.w / Math.abs(dirz) + d.w, d.yaw, 0.095);
+    }
+    for (const h of H_ROADS) {
+      const t = (h.pos - d.cz) / dirz;
+      const x = d.cx + t * dirx;
+      if (Math.abs(x) < 320) patches.add(x, h.pos, d.w, h.w / Math.abs(dirx) + d.w, d.yaw, 0.095);
+    }
+  }
+
+  scene.add(asphalt.build(true));
+  scene.add(paint.build(false));
+  scene.add(patches.build(true));
+
+  function distToDiag(x, z, d) {
+    return Math.abs((x - d.cx) * Math.cos(d.yaw) - (z - d.cz) * Math.sin(d.yaw));
+  }
+  function onAnyRoad(x, z, margin) {
+    for (const r of V_ROADS) if (Math.abs(x - r.pos) < r.w / 2 + margin) return true;
+    for (const r of H_ROADS) if (Math.abs(z - r.pos) < r.w / 2 + margin) return true;
+    for (const d of DIAGS) if (distToDiag(x, z, d) < d.w / 2 + margin) return true;
+    return false;
+  }
+
+  // ----- blocks: 2 or 4 buildings each, fronts facing the road -----
+  const BUILDING_COLORS = [0xb8b0a4, 0x9aa4ad, 0xc4b49a, 0xa8b89e, 0xbfa3a0, 0x93a0b5];
+  function placeBuildings(voxMeshes) {
+    const boxGeoCache = [];
+    for (let i = 0; i + 1 < V_ROADS.length; i++) {
+      for (let j = 0; j + 1 < H_ROADS.length; j++) {
+        const x1 = V_ROADS[i].pos + V_ROADS[i].w / 2 + 2;
+        const x2 = V_ROADS[i + 1].pos - V_ROADS[i + 1].w / 2 - 2;
+        const z1 = H_ROADS[j].pos + H_ROADS[j].w / 2 + 2;
+        const z2 = H_ROADS[j + 1].pos - H_ROADS[j + 1].w / 2 - 2;
+        const bw = x2 - x1, bd = z2 - z1;
+        if (bw < 24 || bd < 24) continue;
+
+        const count = cityRnd() < 0.5 ? 2 : 4;
+        let sides = [0, 1, 2, 3];                    // +Z, -Z, +X, -X edge of block
+        if (count === 2) {
+          const first = Math.floor(cityRnd() * 4);
+          sides = [first, first ^ 1];                // opposite pair
+        }
+        for (const side of sides) {
+          const w = 8 + cityRnd() * 6;               // frontage
+          const d2 = 8 + cityRnd() * 5;              // depth
+          const h = 6 + cityRnd() * 12;
+          const cx0 = (x1 + x2) / 2, cz0 = (z1 + z2) / 2;
+          const jw = (side < 2 ? bw : bd) / 2 - w / 2 - 2;
+          const jit = (cityRnd() * 2 - 1) * Math.max(0, jw);
+          let x, z, yaw;
+          if (side === 0) { x = cx0 + jit; z = z2 - d2 / 2 - 1.5; yaw = 0; }
+          else if (side === 1) { x = cx0 + jit; z = z1 + d2 / 2 + 1.5; yaw = Math.PI; }
+          else if (side === 2) { x = x2 - d2 / 2 - 1.5; z = cz0 + jit; yaw = Math.PI / 2; }
+          else { x = x1 + d2 / 2 + 1.5; z = cz0 + jit; yaw = -Math.PI / 2; }
+
+          let bad = false;
+          for (const dg of DIAGS) if (distToDiag(x, z, dg) < dg.w / 2 + (w + d2) / 2) bad = true;
+          for (const o of obstacles) {
+            const rr = o.r + (w + d2) / 4;
+            if ((o.x - x) * (o.x - x) + (o.z - z) * (o.z - z) < rr * rr) bad = true;
+          }
+          if (bad) continue;
+
+          let mesh;
+          if (voxMeshes && voxMeshes.length) {
+            mesh = voxMeshes[Math.floor(cityRnd() * voxMeshes.length)].clone();
+          } else {
+            const geo = new THREE.BoxGeometry(w, h, d2);
+            boxGeoCache.push(geo);
+            mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({
+              color: BUILDING_COLORS[Math.floor(cityRnd() * BUILDING_COLORS.length)],
+            }));
+            mesh.position.y = h / 2;
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+          }
+          const holder = new THREE.Group();
+          holder.add(mesh);
+          holder.position.set(x, 0, z);
+          holder.rotation.y = yaw;                   // front (+Z) faces the road
+          scene.add(holder);
+          obstacles.push({ x, z, r: (w + d2) / 4 });
+        }
+      }
+    }
   }
 
   // --------------------------------------------------------------- HUD ----
@@ -190,7 +371,7 @@
       for (const side of [-0.75, 0.75]) {
         const m = skidPool[skidIdx];
         skidIdx = (skidIdx + 1) % SKID_MAX;
-        m.position.set(rx + sx * side, 0.025 + (skidIdx % 8) * 0.0012, rz + sz * side);
+        m.position.set(rx + sx * side, 0.11 + (skidIdx % 8) * 0.0012, rz + sz * side);
         m.rotation.y = player.heading;
         m.material.opacity = 0.5;
         m.visible = true;
@@ -256,8 +437,7 @@
     drifting: false,
   };
 
-  const aiCars = []; // { group, loop, theta, radius }
-  const trees = [];  // { x, z, r }
+  const aiCars = []; // { group, tilt, pos, heading, v, base, wps, idx, radius }
 
   // ------------------------------------------------------------- camera ---
   const cam = { yaw: 0, pitch: 0.34, dist: 10, dragging: false, lastDrag: 0 };
@@ -305,7 +485,7 @@
       new THREE.MeshBasicMaterial({ map: blobTex, transparent: true, depthWrite: false })
     );
     blob.rotation.x = -Math.PI / 2;
-    blob.position.y = 0.015;
+    blob.position.y = 0.12;          // above the road surface + markings
     return blob;
   }
 
@@ -322,21 +502,17 @@
   }
 
   function scatterTrees(meshes, rnd) {
-    const COUNT = 90;
+    const COUNT = 60;
+    let placed = 0;
     let attempts = 0;
-    while (trees.length < COUNT && attempts++ < 4000) {
-      const x = (rnd() * 2 - 1) * (WORLD_BOUND + 30);
-      const z = (rnd() * 2 - 1) * (WORLD_BOUND + 30);
-      const d = Math.hypot(x, z);
-      if (d < 16) continue;                                  // spawn area
-      let onLoop = false;
-      for (const loop of AI_LOOPS) {
-        if (Math.abs(d - loop.r) < 7) { onLoop = true; break; }
-      }
-      if (onLoop) continue;
+    while (placed < COUNT && attempts++ < 6000) {
+      const x = (rnd() * 2 - 1) * (WORLD_BOUND + 20);
+      const z = (rnd() * 2 - 1) * (WORLD_BOUND + 20);
+      if (onAnyRoad(x, z, 3)) continue;                      // keep off the streets
       let near = false;
-      for (const t of trees) {
-        if ((t.x - x) * (t.x - x) + (t.z - z) * (t.z - z) < 12 * 12) { near = true; break; }
+      for (const o of obstacles) {
+        const rr = o.r + 4;
+        if ((o.x - x) * (o.x - x) + (o.z - z) * (o.z - z) < rr * rr) { near = true; break; }
       }
       if (near) continue;
 
@@ -347,8 +523,29 @@
       tree.position.set(x, 0, z);
       tree.rotation.y = rnd() * Math.PI * 2;
       scene.add(tree);
-      trees.push({ x, z, r: 0.9 * s });
+      obstacles.push({ x, z, r: 0.9 * s });
+      placed++;
     }
+  }
+
+  // Waypoints for a rectangular circuit over the grid, shifted into the
+  // left lane of each leg (left-hand traffic).
+  function rectLoop(xa, xb, za, zb, cw) {
+    const cs = cw
+      ? [[xa, za], [xb, za], [xb, zb], [xa, zb]]
+      : [[xa, za], [xa, zb], [xb, zb], [xb, za]];
+    const wps = [];
+    for (let i = 0; i < 4; i++) {
+      const p = cs[i], prev = cs[(i + 3) % 4], next = cs[(i + 1) % 4];
+      const din = { x: Math.sign(p[0] - prev[0]), z: Math.sign(p[1] - prev[1]) };
+      const dout = { x: Math.sign(next[0] - p[0]), z: Math.sign(next[1] - p[1]) };
+      const leftIn = { x: din.z, z: -din.x };
+      const leftOut = { x: dout.z, z: -dout.x };
+      const vLeft = din.x === 0 ? leftIn : leftOut;   // left of the vertical leg
+      const hLeft = din.x === 0 ? leftOut : leftIn;   // left of the horizontal leg
+      wps.push({ x: p[0] + vLeft.x * LANE_OFF, z: p[1] + hLeft.z * LANE_OFF });
+    }
+    return wps;
   }
 
   async function init() {
@@ -363,19 +560,37 @@
     const p = makeCarGroup(volvo);
     player.group = p.group;
     player.tilt = p.tilt;
-    player.heading = Math.PI / 2;    // face +X down between the loops
+    // spawn in the left lane of a central vertical road, heading +Z
+    const spawnRoad = V_ROADS[Math.floor(V_ROADS.length / 2)];
+    player.pos.set(spawnRoad.pos + LANE_OFF, 0, 30);
+    player.heading = 0;
 
+    const vLast = V_ROADS.length - 1, hLast = H_ROADS.length - 1;
+    const loops = [
+      { wps: rectLoop(V_ROADS[1].pos, V_ROADS[Math.min(2, vLast)].pos, H_ROADS[1].pos, H_ROADS[Math.min(2, hLast)].pos, true), base: 8 },
+      { wps: rectLoop(V_ROADS[0].pos, V_ROADS[vLast].pos, H_ROADS[0].pos, H_ROADS[hLast].pos, false), base: 11 },
+    ];
     const aiMeshes = [nissan, vw];
-    AI_LOOPS.forEach((loop, i) => {
+    loops.forEach((loop, i) => {
       const g = makeCarGroup(aiMeshes[i]);
-      aiCars.push({ group: g.group, tilt: g.tilt, loop, theta: Math.PI * (0.4 + i), radius: 1.5 });
+      const start = loop.wps[0];
+      aiCars.push({
+        group: g.group, tilt: g.tilt,
+        pos: new THREE.Vector3(start.x, 0, start.z),
+        heading: 0, v: 0, base: loop.base,
+        wps: loop.wps, idx: 1, radius: 1.5,
+      });
     });
 
+    const buildingMeshes = BUILDING_VOX.length
+      ? await Promise.all(BUILDING_VOX.map((u) => VOX.load(u, { scale: VOXEL_SCALE })))
+      : null;
+    placeBuildings(buildingMeshes);
     scatterTrees([tree1, tree2], mulberry32(20260711));
     initFx();
 
     document.getElementById('loading').remove();
-    window.__voxDrive = { player };   // debug / test hook
+    window.__voxDrive = { player, aiCars };   // debug / test hook
     requestAnimationFrame(tick);
   }
 
@@ -461,7 +676,7 @@
         player.vel.multiplyScalar(0.5);
       }
     }
-    for (const t of trees) collideCircle(t.x, t.z, t.r);
+    for (const o of obstacles) collideCircle(o.x, o.z, o.r);
     for (const ai of aiCars) collideCircle(ai.group.position.x, ai.group.position.z, ai.radius);
 
     // visuals
@@ -501,15 +716,24 @@
 
   function updateAI(dt) {
     for (const ai of aiCars) {
-      ai.theta += (ai.loop.speed / ai.loop.r) * ai.loop.dir * dt;
-      const x = Math.cos(ai.theta) * ai.loop.r;
-      const z = Math.sin(ai.theta) * ai.loop.r;
-      // velocity direction = d(pos)/dtheta * dir
-      const vx = -Math.sin(ai.theta) * ai.loop.dir;
-      const vz = Math.cos(ai.theta) * ai.loop.dir;
-      ai.group.position.set(x, 0, z);
-      ai.group.rotation.y = Math.atan2(vx, vz);
-      ai.tilt.rotation.z = 0.02 * ai.loop.dir;
+      const wp = ai.wps[ai.idx];
+      const dx = wp.x - ai.pos.x, dz = wp.z - ai.pos.z;
+      if (dx * dx + dz * dz < 3.5 * 3.5) ai.idx = (ai.idx + 1) % ai.wps.length;
+
+      let diff = Math.atan2(dx, dz) - ai.heading;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      ai.heading += clamp(diff, -1.7 * dt, 1.7 * dt);
+
+      // slow down for corners
+      const target = ai.base * (1 - 0.72 * Math.min(1, Math.abs(diff) * 1.4));
+      ai.v += (target - ai.v) * Math.min(1, dt * 1.6);
+      ai.pos.x += Math.sin(ai.heading) * ai.v * dt;
+      ai.pos.z += Math.cos(ai.heading) * ai.v * dt;
+
+      ai.group.position.copy(ai.pos);
+      ai.group.rotation.y = ai.heading;
+      ai.tilt.rotation.z = clamp(-diff * ai.v * 0.006, -0.04, 0.04);
     }
   }
 
