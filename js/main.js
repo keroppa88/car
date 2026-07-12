@@ -659,6 +659,44 @@ import { AUDIO } from './audio.js';
     return hit ? hit.point.y : 0;
   }
 
+  // 垂直の構築物(建物・壁)との当たり判定: 車体の高さから進行方向へ短い
+  // レイを3本飛ばし、ほぼ垂直な面に当たったら壁とみなして滑らせて止める。
+  // 坂や橋のスロープ(面が上を向いている)は素通りするので登坂は妨げない。
+  const wallCaster = new THREE.Raycaster();
+  const wallDir = new THREE.Vector3();
+  const wallOrigin = new THREE.Vector3();
+  const wallNormal = new THREE.Vector3();
+  function collideWalls(dt) {
+    if (!mapRoot) return;
+    const speed = player.vel.length();
+    if (speed < 0.3) return;
+    wallDir.copy(player.vel).multiplyScalar(1 / speed);
+    const reach = 2.5 + speed * dt;
+    wallCaster.far = reach;
+    for (const side of [-0.85, 0, 0.85]) {
+      wallOrigin.set(
+        player.pos.x - wallDir.z * side,
+        player.pos.y + 1.1,
+        player.pos.z + wallDir.x * side
+      );
+      wallCaster.set(wallOrigin, wallDir);
+      const hit = wallCaster.intersectObject(mapRoot, true)[0];
+      if (!hit || !hit.face) continue;
+      wallNormal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+      if (Math.abs(wallNormal.y) > 0.55) continue;          // 坂・地面は壁ではない
+      if (wallNormal.dot(wallDir) > 0) wallNormal.negate(); // 面の向きを車側へ
+      const into = player.vel.x * wallNormal.x + player.vel.z * wallNormal.z;
+      if (into < 0) {
+        player.vel.x -= wallNormal.x * into;                // 壁沿いに滑らせる
+        player.vel.z -= wallNormal.z * into;
+        player.vel.multiplyScalar(0.9);
+      }
+      const pen = Math.min(reach - hit.distance, 0.5);
+      player.pos.x += wallNormal.x * pen;
+      player.pos.z += wallNormal.z * pen;
+    }
+  }
+
   // --------------------------------------------------------------- init ---
   // Soft contact shadow that sits directly under a car at all times —
   // the directional shadow alone lands beside the body when the sun is low.
@@ -1052,8 +1090,9 @@ import { AUDIO } from './audio.js';
     for (const o of obstacles) collideCircle(o.x, o.z, o.r);
     for (const ai of aiCars) collideCircle(ai.group.position.x, ai.group.position.z, ai.radius);
 
-    // custom maps: ride on the actual road surface (bridges, slopes)
+    // custom maps: collide with vertical structures, ride on the surface
     if (mapRoot) {
+      collideWalls(dt);
       const gy = groundHeightAt(player.pos.x, player.pos.y, player.pos.z);
       player.pos.y += (gy - player.pos.y) * Math.min(1, dt * 9);
     }
