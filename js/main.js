@@ -642,16 +642,18 @@ import { AUDIO } from './audio.js';
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
-  // Follow the map's road surface: cast a short ray down from just above
-  // the car, so it climbs bridges/slopes but never pops up onto rooftops
-  // (the ray starts below them). Falls back to y=0 off the map.
+  // Follow the map's road surface: cast a ray down from above the car —
+  // 車の高さ(約2.7m)×1.2 の位置から — so the car rides on top of the road
+  // slab instead of sinking into it, climbs bridges/slopes, and still never
+  // pops up onto rooftops (the ray starts below them). Falls back to y=0.
+  const RIDE_RAY = 2.7 * 1.2;
   const groundCaster = new THREE.Raycaster();
-  groundCaster.far = 90;
+  groundCaster.far = 120;
   const DOWN = new THREE.Vector3(0, -1, 0);
   const rayOrigin = new THREE.Vector3();
   function groundHeightAt(x, y, z) {
     if (!mapRoot) return 0;
-    rayOrigin.set(x, y + 2.5, z);
+    rayOrigin.set(x, y + RIDE_RAY, z);
     groundCaster.set(rayOrigin, DOWN);
     const hit = groundCaster.intersectObject(mapRoot, true)[0];
     return hit ? hit.point.y : 0;
@@ -823,7 +825,8 @@ import { AUDIO } from './audio.js';
     const wrap = new THREE.Group();
     wrap.add(map);
     const pScale = parseFloat(qs.get('scale'));
-    const scale = pScale || (Math.max(size.x, size.y, size.z) > 4000 ? 0.001 : 1);
+    // mm 単位の地図は実寸(1/1000)だと街路が車に対して窮屈なので2倍で読む
+    const scale = pScale || (Math.max(size.x, size.y, size.z) > 4000 ? 0.002 : 1);
     wrap.scale.setScalar(scale);
     const zupParam = qs.get('zup');
     const zup = zupParam !== null ? zupParam === '1' : size.z < size.y * 0.5;
@@ -891,6 +894,8 @@ import { AUDIO } from './audio.js';
         player.pos.set(parseFloat(qs.get('sx')) || 0, 0, parseFloat(qs.get('sz')) || 0);
         player.heading = 0;
       }
+      // start on top of the road surface, not inside the ground slab
+      player.pos.y = groundHeightAt(player.pos.x, 30, player.pos.z);
       const meshPool = [nissan, vw, nissan.clone(), vw.clone()];
       Object.keys(info.loops).slice(0, 4).forEach((nm, i) => {
         const wps = info.loops[nm].sort((a, b) => a.i - b.i).map((w) => ({ x: w.p.x, z: w.p.z }));
@@ -898,7 +903,7 @@ import { AUDIO } from './audio.js';
         const g = makeCarGroup(meshPool[i]);
         aiCars.push({
           group: g.group, tilt: g.tilt,
-          pos: new THREE.Vector3(wps[0].x, 0, wps[0].z),
+          pos: new THREE.Vector3(wps[0].x, groundHeightAt(wps[0].x, 30, wps[0].z), wps[0].z),
           heading: 0, v: 0, base: 9 + i * 1.5,
           wps, idx: 1, radius: 1.5,
         });
