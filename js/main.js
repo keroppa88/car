@@ -5,12 +5,21 @@
  *   A: accel  S: brake  Space: handbrake (drift)
  *   Up/Down: shift  Left/Right: steer  Mouse drag: camera
  */
+import * as THREE from 'three';
+import { GLTFLoader } from '../lib/GLTFLoader.js';
+import { VOX } from './vox.js';
+import { AUDIO } from './audio.js';
+
 (function () {
   'use strict';
 
-  const BOUND_X_MIN = -290;        // playable area (m); extends east into the forest
-  const BOUND_X_MAX = 710;
-  const BOUND_Z = 290;
+  // カスタムマップ: ?map=maps/sample.glb のように glTF/GLB を指定すると、
+  // 自動生成の街の代わりにそのマップが読み込まれる(詳細は README)。
+  const MAP_GLTF = new URLSearchParams(location.search).get('map') || '';
+
+  let BOUND_X_MIN = -290;          // playable area (m); extends east into the forest
+  let BOUND_X_MAX = 710;
+  let BOUND_Z = 290;
   const VOXEL_SCALE = 0.06;        // 1 voxel = 6 cm -> cars ~4.8 m long
   const TREE_SCALE = 0.08;
 
@@ -279,9 +288,14 @@
   patches.add(connector[0].x, connector[0].z, 10, 10, 0, 0.095);          // junction mouths
   patches.add(connector[8].x, connector[8].z, 11, 11, Math.PI / 4, 0.095);
 
-  scene.add(asphalt.build(true));
-  scene.add(paint.build(false));
-  scene.add(patches.build(true));
+  if (!MAP_GLTF) {
+    scene.add(asphalt.build(true));
+    scene.add(paint.build(false));
+    scene.add(patches.build(true));
+  } else {
+    signals.length = 0;              // カスタムマップに自動生成の信号は無い
+    ground.position.y = -0.08;       // マップ自身の地面の下に敷く保険
+  }
 
   // ----- traffic signals -----
   // Two-phase controller shared by every grid intersection:
@@ -742,6 +756,38 @@
     return wps;
   }
 
+  // Load a glTF/GLB world. Conventions (see README):
+  //   - meshes named col_*  -> round collider from their bounding box
+  //   - empty named spawn   -> player start (its +Z = initial heading)
+  //   - empties wp_<loop>_<n> -> AI waypoint loops, driven in index order
+  async function loadGltfMap(url) {
+    const gltf = await new GLTFLoader().loadAsync(url);
+    const map = gltf.scene;
+    map.updateMatrixWorld(true);
+    const out = { spawn: null, loops: {} };
+    map.traverse((o) => {
+      if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
+      const name = o.name || '';
+      if (o.isMesh && name.startsWith('col_')) {
+        const box = new THREE.Box3().setFromObject(o);
+        const c = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        obstacles.push({ x: c.x, z: c.z, r: Math.max(0.5, (size.x + size.z) / 4) });
+      }
+      if (name === 'spawn') out.spawn = o;
+      const m = name.match(/^wp_(.+)_(\d+)$/);
+      if (m) {
+        (out.loops[m[1]] = out.loops[m[1]] || []).push({ i: +m[2], p: o.getWorldPosition(new THREE.Vector3()) });
+      }
+    });
+    scene.add(map);
+    const box = new THREE.Box3().setFromObject(map);
+    BOUND_X_MIN = box.min.x - 5;
+    BOUND_X_MAX = box.max.x + 5;
+    BOUND_Z = Math.max(Math.abs(box.min.z), Math.abs(box.max.z)) + 5;
+    return out;
+  }
+
   async function init() {
     const [volvo, nissan, vw, tree1, tree2] = await Promise.all([
       VOX.load('vox/volvo.vox', { scale: VOXEL_SCALE }),
@@ -754,6 +800,37 @@
     const p = makeCarGroup(volvo);
     player.group = p.group;
     player.tilt = p.tilt;
+
+    if (MAP_GLTF) {
+      const info = await loadGltfMap(MAP_GLTF);
+      if (info.spawn) {
+        const sp = info.spawn.getWorldPosition(new THREE.Vector3());
+        const f = new THREE.Vector3(0, 0, 1).applyQuaternion(info.spawn.getWorldQuaternion(new THREE.Quaternion()));
+        player.pos.set(sp.x, 0, sp.z);
+        player.heading = Math.atan2(f.x, f.z);
+      } else {
+        player.pos.set(0, 0, 0);
+        player.heading = 0;
+      }
+      const meshPool = [nissan, vw, nissan.clone(), vw.clone()];
+      Object.keys(info.loops).slice(0, 4).forEach((nm, i) => {
+        const wps = info.loops[nm].sort((a, b) => a.i - b.i).map((w) => ({ x: w.p.x, z: w.p.z }));
+        if (wps.length < 2) return;
+        const g = makeCarGroup(meshPool[i]);
+        aiCars.push({
+          group: g.group, tilt: g.tilt,
+          pos: new THREE.Vector3(wps[0].x, 0, wps[0].z),
+          heading: 0, v: 0, base: 9 + i * 1.5,
+          wps, idx: 1, radius: 1.5,
+        });
+      });
+      initFx();
+      document.getElementById('loading').remove();
+      window.__voxDrive = { player, aiCars };   // debug / test hook
+      requestAnimationFrame(tick);
+      return;
+    }
+
     // spawn in the left lane of a central vertical road, heading +Z
     const spawnRoad = V_ROADS[Math.floor(V_ROADS.length / 2)];
     player.pos.set(spawnRoad.pos + LANE_OFF, 0, 30);
