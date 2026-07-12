@@ -5,12 +5,23 @@
  *   A: accel  S: brake  Space: handbrake (drift)
  *   Up/Down: shift  Left/Right: steer  Mouse drag: camera
  */
+import * as THREE from 'three';
+import { GLTFLoader } from '../lib/GLTFLoader.js';
+import { mergeGeometries } from '../lib/BufferGeometryUtils.js';
+import { VOX } from './vox.js';
+import { AUDIO } from './audio.js';
+
 (function () {
   'use strict';
 
-  const BOUND_X_MIN = -290;        // playable area (m); extends east into the forest
-  const BOUND_X_MAX = 710;
-  const BOUND_Z = 290;
+  // カスタムマップ: ?map=maps/sample.glb のように glTF/GLB を指定すると、
+  // 自動生成の街の代わりにそのマップが読み込まれる(詳細は README)。
+  const MAP_GLTF = new URLSearchParams(location.search).get('map') || '';
+  let mapRoot = null;              // set when a custom map is loaded (ground raycasts)
+
+  let BOUND_X_MIN = -290;          // playable area (m); extends east into the forest
+  let BOUND_X_MAX = 710;
+  let BOUND_Z = 290;
   const VOXEL_SCALE = 0.06;        // 1 voxel = 6 cm -> cars ~4.8 m long
   const TREE_SCALE = 0.08;
 
@@ -279,9 +290,14 @@
   patches.add(connector[0].x, connector[0].z, 10, 10, 0, 0.095);          // junction mouths
   patches.add(connector[8].x, connector[8].z, 11, 11, Math.PI / 4, 0.095);
 
-  scene.add(asphalt.build(true));
-  scene.add(paint.build(false));
-  scene.add(patches.build(true));
+  if (!MAP_GLTF) {
+    scene.add(asphalt.build(true));
+    scene.add(paint.build(false));
+    scene.add(patches.build(true));
+  } else {
+    signals.length = 0;              // カスタムマップに自動生成の信号は無い
+    ground.position.y = -0.08;       // マップ自身の地面の下に敷く保険
+  }
 
   // ----- traffic signals -----
   // Two-phase controller shared by every grid intersection:
@@ -530,7 +546,7 @@
       for (const side of [-0.75, 0.75]) {
         const m = skidPool[skidIdx];
         skidIdx = (skidIdx + 1) % SKID_MAX;
-        m.position.set(rx + sx * side, 0.11 + (skidIdx % 8) * 0.0012, rz + sz * side);
+        m.position.set(rx + sx * side, player.pos.y + 0.11 + (skidIdx % 8) * 0.0012, rz + sz * side);
         m.rotation.y = player.heading;
         m.material.opacity = 0.5;
         m.visible = true;
@@ -544,7 +560,7 @@
       const s = smokePool[smokeIdx];
       smokeIdx = (smokeIdx + 1) % SMOKE_MAX;
       const side = Math.random() < 0.5 ? -0.75 : 0.75;
-      s.position.set(rx + sx * side + (Math.random() - 0.5) * 0.3, 0.25, rz + sz * side + (Math.random() - 0.5) * 0.3);
+      s.position.set(rx + sx * side + (Math.random() - 0.5) * 0.3, player.pos.y + 0.25, rz + sz * side + (Math.random() - 0.5) * 0.3);
       s.scale.setScalar(0.6);
       const d = s.userData;
       d.life = 0; d.max = 0.7 + Math.random() * 0.4;
@@ -621,6 +637,21 @@
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
+
+  // Follow the map's road surface: cast a short ray down from just above
+  // the car, so it climbs bridges/slopes but never pops up onto rooftops
+  // (the ray starts below them). Falls back to y=0 off the map.
+  const groundCaster = new THREE.Raycaster();
+  groundCaster.far = 90;
+  const DOWN = new THREE.Vector3(0, -1, 0);
+  const rayOrigin = new THREE.Vector3();
+  function groundHeightAt(x, y, z) {
+    if (!mapRoot) return 0;
+    rayOrigin.set(x, y + 2.5, z);
+    groundCaster.set(rayOrigin, DOWN);
+    const hit = groundCaster.intersectObject(mapRoot, true)[0];
+    return hit ? hit.point.y : 0;
+  }
 
   // --------------------------------------------------------------- init ---
   // Soft contact shadow that sits directly under a car at all times —
@@ -742,6 +773,95 @@
     return wps;
   }
 
+  // Converter exports (CAD/city scans) often arrive as thousands of tiny
+  // meshes — merge them per material so the GPU sees a handful of draws.
+  function mergeMapMeshes(root) {
+    const groups = new Map();
+    root.updateMatrixWorld(true);
+    root.traverse((o) => {
+      if (!o.isMesh) return;
+      const g = (o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone());
+      g.applyMatrix4(o.matrixWorld);
+      const key = o.material.uuid + '|' + Object.keys(g.attributes).sort().join(',');
+      if (!groups.has(key)) groups.set(key, { mat: o.material, list: [] });
+      groups.get(key).list.push(g);
+    });
+    const merged = new THREE.Group();
+    merged.name = root.name;
+    for (const { mat, list } of groups.values()) {
+      const geo = mergeGeometries(list, false);
+      if (!geo) continue;
+      mat.side = THREE.DoubleSide;      // converted models often have flipped faces
+      merged.add(new THREE.Mesh(geo, mat));
+    }
+    return merged;
+  }
+
+  // Load a glTF/GLB world. Conventions (see README):
+  //   - meshes named col_*  -> round collider from their bounding box
+  //   - empty named spawn   -> player start (its +Z = initial heading)
+  //   - empties wp_<loop>_<n> -> AI waypoint loops, driven in index order
+  // Raw converter exports are auto-adjusted: millimetre units are scaled
+  // down, Z-up models are rotated upright, and the map is centred on the
+  // origin. Override with URL params: &scale= &zup=0/1 &y=
+  async function loadGltfMap(url) {
+    const qs = new URLSearchParams(location.search);
+    const gltf = await new GLTFLoader().loadAsync(url);
+    let map = gltf.scene;
+    map.updateMatrixWorld(true);
+
+    let meshCount = 0;
+    map.traverse((o) => { if (o.isMesh) meshCount++; });
+    // hand-made maps keep their node names; giant converter dumps get merged
+    if (meshCount > 200) map = mergeMapMeshes(map);
+
+    const size = new THREE.Box3().setFromObject(map).getSize(new THREE.Vector3());
+    const wrap = new THREE.Group();
+    wrap.add(map);
+    const pScale = parseFloat(qs.get('scale'));
+    const scale = pScale || (Math.max(size.x, size.y, size.z) > 4000 ? 0.001 : 1);
+    wrap.scale.setScalar(scale);
+    const zupParam = qs.get('zup');
+    const zup = zupParam !== null ? zupParam === '1' : size.z < size.y * 0.5;
+    if (zup) wrap.rotation.x = -Math.PI / 2;
+    scene.add(wrap);
+    wrap.updateMatrixWorld(true);
+
+    // centre the map on the origin (x/z) and rest its lowest surface —
+    // the road/ground — on y=0. Optional height tweak via &y=
+    const box = new THREE.Box3().setFromObject(wrap);
+    const c = box.getCenter(new THREE.Vector3());
+    wrap.position.x -= c.x;
+    wrap.position.z -= c.z;
+    wrap.position.y -= box.min.y;
+    wrap.position.y += parseFloat(qs.get('y')) || 0;
+    wrap.updateMatrixWorld(true);
+    mapRoot = wrap;
+
+    const out = { spawn: null, loops: {} };
+    wrap.traverse((o) => {
+      if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
+      const name = o.name || '';
+      if (o.isMesh && name.startsWith('col_')) {
+        const b = new THREE.Box3().setFromObject(o);
+        const cc = b.getCenter(new THREE.Vector3());
+        const sz = b.getSize(new THREE.Vector3());
+        obstacles.push({ x: cc.x, z: cc.z, r: Math.max(0.5, (sz.x + sz.z) / 4) });
+      }
+      if (name === 'spawn') out.spawn = o;
+      const m = name.match(/^wp_(.+)_(\d+)$/);
+      if (m) {
+        (out.loops[m[1]] = out.loops[m[1]] || []).push({ i: +m[2], p: o.getWorldPosition(new THREE.Vector3()) });
+      }
+    });
+
+    const fin = new THREE.Box3().setFromObject(wrap);
+    BOUND_X_MIN = fin.min.x - 5;
+    BOUND_X_MAX = fin.max.x + 5;
+    BOUND_Z = Math.max(Math.abs(fin.min.z), Math.abs(fin.max.z)) + 5;
+    return out;
+  }
+
   async function init() {
     const [volvo, nissan, vw, tree1, tree2] = await Promise.all([
       VOX.load('vox/volvo.vox', { scale: VOXEL_SCALE }),
@@ -754,6 +874,38 @@
     const p = makeCarGroup(volvo);
     player.group = p.group;
     player.tilt = p.tilt;
+
+    if (MAP_GLTF) {
+      const info = await loadGltfMap(MAP_GLTF);
+      if (info.spawn) {
+        const sp = info.spawn.getWorldPosition(new THREE.Vector3());
+        const f = new THREE.Vector3(0, 0, 1).applyQuaternion(info.spawn.getWorldQuaternion(new THREE.Quaternion()));
+        player.pos.set(sp.x, 0, sp.z);
+        player.heading = Math.atan2(f.x, f.z);
+      } else {
+        const qs = new URLSearchParams(location.search);
+        player.pos.set(parseFloat(qs.get('sx')) || 0, 0, parseFloat(qs.get('sz')) || 0);
+        player.heading = 0;
+      }
+      const meshPool = [nissan, vw, nissan.clone(), vw.clone()];
+      Object.keys(info.loops).slice(0, 4).forEach((nm, i) => {
+        const wps = info.loops[nm].sort((a, b) => a.i - b.i).map((w) => ({ x: w.p.x, z: w.p.z }));
+        if (wps.length < 2) return;
+        const g = makeCarGroup(meshPool[i]);
+        aiCars.push({
+          group: g.group, tilt: g.tilt,
+          pos: new THREE.Vector3(wps[0].x, 0, wps[0].z),
+          heading: 0, v: 0, base: 9 + i * 1.5,
+          wps, idx: 1, radius: 1.5,
+        });
+      });
+      initFx();
+      document.getElementById('loading').remove();
+      window.__voxDrive = { player, aiCars };   // debug / test hook
+      requestAnimationFrame(tick);
+      return;
+    }
+
     // spawn in the left lane of a central vertical road, heading +Z
     const spawnRoad = V_ROADS[Math.floor(V_ROADS.length / 2)];
     player.pos.set(spawnRoad.pos + LANE_OFF, 0, 30);
@@ -890,6 +1042,12 @@
     for (const o of obstacles) collideCircle(o.x, o.z, o.r);
     for (const ai of aiCars) collideCircle(ai.group.position.x, ai.group.position.z, ai.radius);
 
+    // custom maps: ride on the actual road surface (bridges, slopes)
+    if (mapRoot) {
+      const gy = groundHeightAt(player.pos.x, player.pos.y, player.pos.z);
+      player.pos.y += (gy - player.pos.y) * Math.min(1, dt * 9);
+    }
+
     // visuals
     player.group.position.copy(player.pos);
     player.group.rotation.y = player.heading;
@@ -948,6 +1106,10 @@
       ai.v += (target - ai.v) * Math.min(1, dt * rate);
       ai.pos.x += Math.sin(ai.heading) * ai.v * dt;
       ai.pos.z += Math.cos(ai.heading) * ai.v * dt;
+      if (mapRoot) {
+        const gy = groundHeightAt(ai.pos.x, ai.pos.y, ai.pos.z);
+        ai.pos.y += (gy - ai.pos.y) * Math.min(1, dt * 9);
+      }
 
       ai.group.position.copy(ai.pos);
       ai.group.rotation.y = ai.heading;

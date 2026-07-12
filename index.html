@@ -102,9 +102,9 @@
   <div><b>M</b>サウンド ON/OFF</div>
 </div>
 
-<script src="lib/three.min.js"></script>
-<script src="js/vox.js"></script>
-<script src="js/audio.js"></script>
-<script src="js/main.js"></script>
+<script type="importmap">
+{ "imports": { "three": "./lib/three.module.js" } }
+</script>
+<script type="module" src="js/main.js"></script>
 </body>
 </html>

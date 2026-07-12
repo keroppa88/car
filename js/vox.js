@@ -4,9 +4,9 @@
  * (translation + rotation), which is enough for models exported from
  * recent MagicaVoxel versions (VOX 150/200).
  */
-(function (global) {
-  'use strict';
+import * as THREE from 'three';
 
+function voxModule() {
   function readDict(dv, pos) {
     const n = dv.getInt32(pos, true); pos += 4;
     const dict = {};
@@ -255,5 +255,7 @@
     return buildMesh(parse(buf), opts);
   }
 
-  global.VOX = { parse, buildMesh, load };
-})(this);
+  return { parse, buildMesh, load };
+}
+
+export const VOX = voxModule();

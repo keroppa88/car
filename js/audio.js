@@ -9,9 +9,7 @@
  * Tyre screech: looped white noise through two parallel bandpass filters
  * with an LFO wobble — used both for drifting and for hard braking.
  */
-(function (global) {
-  'use strict';
-
+function audioModule() {
   // [min Hz, max Hz] per gear index: R, N, 1, 2, 3, 4, 5.
   // 回転数を上げると音階が上がり、ギアを上げると音域ごと上がる。
   // 隣接ギアは「前のギアの真ん中の回転域の音階 = 次のギアの低い回転域の音階」
@@ -156,7 +154,7 @@
     bp1.frequency.setTargetAtTime(700 + s.slip * 25 + (brake > drift ? 150 : 0), t, 0.1);
   }
 
-  global.AUDIO = {
+  return {
     unlock, toggle, update,
     bands: FREQS,
     _debug() {
@@ -168,4 +166,6 @@
       } : null;
     },
   };
-})(this);
+}
+
+export const AUDIO = audioModule();
