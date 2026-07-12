@@ -593,14 +593,17 @@ import { AUDIO } from './audio.js';
   }
 
   // ------------------------------------------------------------- player ---
+  // 低いギアは素早く吹け上がり、5速に入れる頃には約70km/h。そこから
+  // 6秒ほどで最高速の110km/hに達する(5速はvmax=32だが空気抵抗との
+  // 釣り合いでちょうど110km/hで頭打ちになる)。
   const GEARS = [
-    { name: 'R', vmax: -8.3, acc: 4.5 },   // ~30 km/h reverse
+    { name: 'R', vmax: -8.3, acc: 5.5 },   // ~30 km/h reverse
     { name: 'N', vmax: 0, acc: 0 },
-    { name: '1', vmax: 6.9, acc: 8.5 },   // 25 km/h
-    { name: '2', vmax: 12.5, acc: 6.4 },   // 45
-    { name: '3', vmax: 19.4, acc: 5.0 },   // 70
-    { name: '4', vmax: 26.4, acc: 3.8 },   // 95
-    { name: '5', vmax: 30.6, acc: 2.8 },   // 110 (最高速度)
+    { name: '1', vmax: 6.1, acc: 10.0 },  // 22 km/h
+    { name: '2', vmax: 11.1, acc: 8.0 },   // 40
+    { name: '3', vmax: 15.3, acc: 7.0 },   // 55
+    { name: '4', vmax: 19.4, acc: 6.0 },   // 70
+    { name: '5', vmax: 32.0, acc: 14.0 },  // 実質110 km/h(最高速度)
   ];
 
   const player = {
@@ -922,19 +925,49 @@ import { AUDIO } from './audio.js';
 
     if (MAP_GLTF) {
       const info = await loadGltfMap(MAP_GLTF);
+      // 開始位置は「道路の上」: 中心付近を放射状にレイキャストして、
+      // 一番よく出てくる高さ(=道路・地表)の中で中心に近い地点を選ぶ。
+      // ビルの屋上は高さがバラバラなので最頻値には選ばれない。
+      function findRoadSpawn() {
+        const samples = [];
+        for (let r = 0; r <= 260; r += 12) {
+          const n = Math.max(1, Math.round(r / 7));
+          for (let i = 0; i < n; i++) {
+            const a = (i / n) * Math.PI * 2;
+            const x = Math.cos(a) * r, z = Math.sin(a) * r;
+            samples.push({ x, z, y: groundHeightAt(x, 500, z), r });
+          }
+        }
+        const counts = new Map();
+        for (const s of samples) {
+          const b = Math.round(s.y / 2);
+          counts.set(b, (counts.get(b) || 0) + 1);
+        }
+        let mode = 0, best = -1;
+        for (const [b, n] of counts) if (n > best) { best = n; mode = b; }
+        const road = samples
+          .filter((s) => Math.abs(s.y - mode * 2) <= 1.5)
+          .sort((a, b) => a.r - b.r)[0];
+        return road || { x: 0, z: 0, y: groundHeightAt(0, 500, 0) };
+      }
+
       if (info.spawn) {
         const sp = info.spawn.getWorldPosition(new THREE.Vector3());
         const f = new THREE.Vector3(0, 0, 1).applyQuaternion(info.spawn.getWorldQuaternion(new THREE.Quaternion()));
         player.pos.set(sp.x, 0, sp.z);
         player.heading = Math.atan2(f.x, f.z);
+        player.pos.y = groundHeightAt(player.pos.x, 500, player.pos.z);
       } else {
         const qs = new URLSearchParams(location.search);
-        player.pos.set(parseFloat(qs.get('sx')) || 0, 0, parseFloat(qs.get('sz')) || 0);
+        if (qs.get('sx') !== null || qs.get('sz') !== null) {
+          player.pos.set(parseFloat(qs.get('sx')) || 0, 0, parseFloat(qs.get('sz')) || 0);
+          player.pos.y = groundHeightAt(player.pos.x, 500, player.pos.z);
+        } else {
+          const road = findRoadSpawn();
+          player.pos.set(road.x, road.y, road.z);
+        }
         player.heading = 0;
       }
-      // start on top of the road surface, not inside the ground slab
-      // (cast from far above so any map scale works)
-      player.pos.y = groundHeightAt(player.pos.x, 500, player.pos.z);
       const meshPool = [nissan, vw, nissan.clone(), vw.clone()];
       Object.keys(info.loops).slice(0, 4).forEach((nm, i) => {
         const wps = info.loops[nm].sort((a, b) => a.i - b.i).map((w) => ({ x: w.p.x, z: w.p.z }));
