@@ -825,8 +825,8 @@ import { AUDIO } from './audio.js';
     const wrap = new THREE.Group();
     wrap.add(map);
     const pScale = parseFloat(qs.get('scale'));
-    // mm 単位の地図は実寸(1/1000)だと街路が車に対して窮屈なので2倍で読む
-    const scale = pScale || (Math.max(size.x, size.y, size.z) > 4000 ? 0.002 : 1);
+    // mm 単位の地図は実寸(1/1000)だと街路が車に対して窮屈なので5倍で読む
+    const scale = pScale || (Math.max(size.x, size.y, size.z) > 4000 ? 0.005 : 1);
     wrap.scale.setScalar(scale);
     const zupParam = qs.get('zup');
     const zup = zupParam !== null ? zupParam === '1' : size.z < size.y * 0.5;
