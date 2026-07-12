@@ -8,7 +8,9 @@
 (function () {
   'use strict';
 
-  const WORLD_BOUND = 290;         // playable half-size (m)
+  const BOUND_X_MIN = -290;        // playable area (m); extends east into the forest
+  const BOUND_X_MAX = 710;
+  const BOUND_Z = 290;
   const VOXEL_SCALE = 0.06;        // 1 voxel = 6 cm -> cars ~4.8 m long
   const TREE_SCALE = 0.08;
 
@@ -72,7 +74,7 @@
     }
     const tex = new THREE.CanvasTexture(cv);
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(90, 90);
+    tex.repeat.set(150, 88);         // square texels on the 2400x1400 ground
     tex.colorSpace = THREE.SRGBColorSpace;
     return tex;
   }
@@ -90,7 +92,8 @@
   scene.background = new THREE.Color(SKY);
   scene.fog = new THREE.Fog(SKY, 130, 480);
 
-  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1200);
+  // near=0.5 keeps enough depth precision at 300 m for the thin road layers
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.5, 1200);
 
   const hemi = new THREE.HemisphereLight(0xdff3ff, 0x5a7a45, 0.95);
   scene.add(hemi);
@@ -110,27 +113,364 @@
   const SUN_DIR = new THREE.Vector3(28, 90, 18).normalize();
 
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(1400, 1400),
+    new THREE.PlaneGeometry(2400, 1400),
     new THREE.MeshLambertMaterial({ map: makeGroundTexture() })
   );
   ground.rotation.x = -Math.PI / 2;
+  ground.position.x = 250;           // covers the city and the forest suburb
   ground.receiveShadow = true;
   scene.add(ground);
 
-  // Dirt rings marking the AI cruise loops.
-  const AI_LOOPS = [
-    { r: 45, dir: 1, speed: 8.5 },
-    { r: 75, dir: -1, speed: 11.5 },
-  ];
-  for (const loop of AI_LOOPS) {
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(loop.r - 2.4, loop.r + 2.4, 96),
-      new THREE.MeshLambertMaterial({ color: 0x96795a })
-    );
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 0.02;
-    ring.receiveShadow = true;
-    scene.add(ring);
+  // ---------------------------------------------------------------- city ---
+  // Procedural street grid: vertical/horizontal roads (occasionally one
+  // diagonal), Japanese-style white lines, blocks with 2 or 4 buildings.
+  //
+  // Two road widths:
+  //   4-lane (two each way, w=14): solid center line, dashed lane dividers,
+  //                                solid edge lines
+  //   2-lane (one each way,  w=8): dashed center line, solid edge lines
+  const ROAD_LEN = 660;               // roads span the whole map
+  const LANE_OFF = 1.75;              // AI keeps to the left lane (Japan)
+
+  // のちに vox の建物を使う場合はここにファイルを追加(モデルの前面 = +Z)。
+  // 空の間はプレースホルダーの箱を配置する。
+  const BUILDING_VOX = [];
+
+  const obstacles = [];               // {x,z,r} buildings + trees, for collision
+
+  // Batches all flat rectangles of one color into a single mesh.
+  function QuadBatch(color) {
+    this.pos = [];
+    this.idx = [];
+    this.color = color;
+  }
+  QuadBatch.prototype.add = function (cx, cz, w, l, yaw, y) {
+    const c = Math.cos(yaw), s = Math.sin(yaw);
+    const base = this.pos.length / 3;
+    for (const [x, z] of [[-w / 2, -l / 2], [w / 2, -l / 2], [w / 2, l / 2], [-w / 2, l / 2]]) {
+      this.pos.push(cx + x * c + z * s, y, cz - x * s + z * c);
+    }
+    this.idx.push(base, base + 2, base + 1, base, base + 3, base + 2);
+  };
+  QuadBatch.prototype.build = function (receiveShadow) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
+    geo.setIndex(this.idx);
+    geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: this.color }));
+    mesh.receiveShadow = !!receiveShadow;
+    return mesh;
+  };
+
+  const cityRnd = mulberry32(424242);
+  function genRoadLine() {
+    const arr = [];
+    let p = -250 + cityRnd() * 30;
+    while (p < 260) {
+      const four = cityRnd() < 0.4;
+      arr.push({ pos: p, w: four ? 14 : 8, four });
+      p += 95 + cityRnd() * 55;
+    }
+    if (!arr.some((r) => r.four)) { arr[1].four = true; arr[1].w = 14; }
+    return arr;
+  }
+  const V_ROADS = genRoadLine();      // roads running along z, at x = pos
+  const H_ROADS = genRoadLine();      // roads running along x, at z = pos
+  // たまに斜めの道路(このシードでは1本、45°)
+  const DIAGS = [];
+  if (cityRnd() < 0.8) {
+    DIAGS.push({ cx: -40 + cityRnd() * 80, cz: -40 + cityRnd() * 80, yaw: Math.PI / 4, w: 8, four: false });
+  }
+
+  const asphalt = new QuadBatch(0x3d3d42);
+  const paint = new QuadBatch(0xe8e8e2);
+  const patches = new QuadBatch(0x3d3d42);
+
+  // Lane markings for one road, in the road's local frame (length along z).
+  function addMarkings(cx, cz, yaw, road) {
+    const c = Math.cos(yaw), s = Math.sin(yaw);
+    const at = (off, w, l, zc) => paint.add(cx + off * c + zc * s, cz - off * s + zc * c, w, l, yaw, 0.06);
+    const edge = road.four ? 6.2 : 3.5;
+    at(edge, 0.15, ROAD_LEN, 0);      // 外側線(実線)
+    at(-edge, 0.15, ROAD_LEN, 0);
+    if (road.four) {
+      at(0, 0.15, ROAD_LEN, 0);       // 中央線(実線)
+      for (let z = -ROAD_LEN / 2; z < ROAD_LEN / 2; z += 8) {  // 車線境界線(破線)
+        at(3.1, 0.15, 4, z + 2);
+        at(-3.1, 0.15, 4, z + 2);
+      }
+    } else {
+      for (let z = -ROAD_LEN / 2; z < ROAD_LEN / 2; z += 10) { // 中央線(破線)
+        at(0, 0.15, 5, z + 2.5);
+      }
+    }
+  }
+
+  for (const r of V_ROADS) {
+    asphalt.add(r.pos, 0, r.w, ROAD_LEN, 0, 0.03);
+    addMarkings(r.pos, 0, 0, r);
+  }
+  for (const r of H_ROADS) {
+    asphalt.add(0, r.pos, r.w, ROAD_LEN, Math.PI / 2, 0.03);
+    addMarkings(0, r.pos, Math.PI / 2, r);
+  }
+  for (const d of DIAGS) {
+    asphalt.add(d.cx, d.cz, d.w, ROAD_LEN * 1.35, d.yaw, 0.03);
+    addMarkings(d.cx, d.cz, d.yaw, d);
+  }
+
+  // Plain asphalt patches hide the markings inside every intersection.
+  const signals = [];                 // signalized grid intersections
+  for (const v of V_ROADS) {
+    for (const h of H_ROADS) {
+      patches.add(v.pos, h.pos, v.w, h.w, 0, 0.09);
+      signals.push({ x: v.pos, z: h.pos, vw: v.w, hw: h.w });
+    }
+  }
+  for (const d of DIAGS) {
+    const dirx = Math.sin(d.yaw), dirz = Math.cos(d.yaw);
+    for (const v of V_ROADS) {
+      const t = (v.pos - d.cx) / dirx;
+      const z = d.cz + t * dirz;
+      if (Math.abs(z) < 320) patches.add(v.pos, z, d.w, v.w / Math.abs(dirz) + d.w, d.yaw, 0.095);
+    }
+    for (const h of H_ROADS) {
+      const t = (h.pos - d.cz) / dirz;
+      const x = d.cx + t * dirx;
+      if (Math.abs(x) < 320) patches.add(x, h.pos, d.w, h.w / Math.abs(dirx) + d.w, d.yaw, 0.095);
+    }
+  }
+
+  // ----- forest course (suburb, east of the city) -----
+  // A meandering 2-lane loop through dense woods, reached by a short
+  // connector from the east end of a city road.
+  const forestLoop = [];              // closed polyline
+  const FOREST_C = { x: 480, z: 0 };
+  const FOREST_N = 220;
+  for (let i = 0; i < FOREST_N; i++) {
+    const th = (i / FOREST_N) * Math.PI * 2;
+    const r = 150 + 45 * Math.sin(3 * th) + 25 * Math.sin(7 * th + 1.3);
+    forestLoop.push({ x: FOREST_C.x + Math.cos(th) * r, z: FOREST_C.z + Math.sin(th) * r });
+  }
+  const connector = [];               // straight link: city edge -> loop start
+  {
+    const a = { x: 322, z: H_ROADS[Math.floor(H_ROADS.length / 2)].pos };
+    const b = forestLoop[Math.floor(FOREST_N / 2)];   // west point of the loop
+    for (let i = 0; i <= 8; i++) connector.push({ x: a.x + (b.x - a.x) * i / 8, z: a.z + (b.z - a.z) * i / 8 });
+  }
+
+  function paveRoute(pts, closed) {
+    const n = closed ? pts.length : pts.length - 1;
+    for (let i = 0; i < n; i++) {
+      const p = pts[i], q = pts[(i + 1) % pts.length];
+      const dx = q.x - p.x, dz = q.z - p.z;
+      const len = Math.hypot(dx, dz);
+      const yaw = Math.atan2(dx, dz);
+      const mx = (p.x + q.x) / 2, mz = (p.z + q.z) / 2;
+      const c = Math.cos(yaw), s = Math.sin(yaw);
+      asphalt.add(mx, mz, 8, len + 3, yaw, 0.03);
+      paint.add(mx + 3.5 * c, mz - 3.5 * s, 0.15, len + 1, yaw, 0.06);   // 外側線
+      paint.add(mx - 3.5 * c, mz + 3.5 * s, 0.15, len + 1, yaw, 0.06);
+      if (i % 2 === 0) paint.add(mx, mz, 0.15, len, yaw, 0.06);          // 中央線(破線)
+    }
+  }
+  paveRoute(forestLoop, true);
+  paveRoute(connector, false);
+  patches.add(connector[0].x, connector[0].z, 10, 10, 0, 0.095);          // junction mouths
+  patches.add(connector[8].x, connector[8].z, 11, 11, Math.PI / 4, 0.095);
+
+  scene.add(asphalt.build(true));
+  scene.add(paint.build(false));
+  scene.add(patches.build(true));
+
+  // ----- traffic signals -----
+  // Two-phase controller shared by every grid intersection:
+  //   NS (vertical roads): green 8 s -> yellow 3 s -> red 11 s
+  //   EW (horizontal roads): the opposite — red while NS is green/yellow.
+  const SIG_CYCLE = 22;
+  function signalState(axis, timeSec) {
+    const local = axis === 0 ? timeSec % SIG_CYCLE : (timeSec + 11) % SIG_CYCLE;
+    if (local < 8) return 'g';
+    if (local < 11) return 'y';
+    return 'r';
+  }
+
+  const LAMP_BRIGHT = {
+    g: new THREE.MeshBasicMaterial({ color: 0x00c878 }),
+    y: new THREE.MeshBasicMaterial({ color: 0xffc400 }),
+    r: new THREE.MeshBasicMaterial({ color: 0xff4438 }),
+  };
+  const LAMP_DIM = {};
+  for (const k of ['g', 'y', 'r']) {
+    LAMP_DIM[k] = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(LAMP_BRIGHT[k].color).multiplyScalar(0.13),
+    });
+  }
+  const lampMeshes = [];              // {mesh, color, axis}
+  {
+    const poleGeo = new THREE.CylinderGeometry(0.09, 0.09, 5.6, 6);
+    const poleMat = new THREE.MeshLambertMaterial({ color: 0x555a5e });
+    const boxGeo = new THREE.BoxGeometry(2.0, 0.66, 0.24);
+    const boxMat = new THREE.MeshLambertMaterial({ color: 0x2c2f33 });
+    const lampGeo = new THREE.CircleGeometry(0.22, 12);
+    for (const s of signals) {
+      const g = new THREE.Group();
+      g.position.set(s.x + s.vw / 2 + 1.2, 0, s.z + s.hw / 2 + 1.2);
+      const pole = new THREE.Mesh(poleGeo, poleMat);
+      pole.position.y = 2.8;
+      g.add(pole);
+      // one horizontal 青黄赤 box per axis, lamps on both faces
+      [{ axis: 0, y: 5.2, yaw: 0 }, { axis: 1, y: 4.3, yaw: Math.PI / 2 }].forEach((cfg) => {
+        const holder = new THREE.Group();
+        holder.position.y = cfg.y;
+        holder.rotation.y = cfg.yaw;
+        holder.add(new THREE.Mesh(boxGeo, boxMat));
+        [['g', -0.63], ['y', 0], ['r', 0.63]].forEach(([color, lx]) => {
+          for (const face of [1, -1]) {
+            const lamp = new THREE.Mesh(lampGeo, LAMP_DIM[color]);
+            lamp.position.set(lx, 0, 0.13 * face);
+            if (face < 0) lamp.rotation.y = Math.PI;
+            holder.add(lamp);
+            lampMeshes.push({ mesh: lamp, color, axis: cfg.axis });
+          }
+        });
+        g.add(holder);
+      });
+      scene.add(g);
+    }
+  }
+
+  const sigWinEl = document.getElementById('signal');
+  const sigLampEls = { g: document.getElementById('sig-g'), y: document.getElementById('sig-y'), r: document.getElementById('sig-r') };
+  let lastSigStates = ['', ''];
+
+  function updateSignals(timeSec) {
+    const states = [signalState(0, timeSec), signalState(1, timeSec)];
+    if (states[0] !== lastSigStates[0] || states[1] !== lastSigStates[1]) {
+      lastSigStates = states;
+      for (const l of lampMeshes) {
+        l.mesh.material = states[l.axis] === l.color ? LAMP_BRIGHT[l.color] : LAMP_DIM[l.color];
+      }
+    }
+
+    // HUD window: show the player's own signal when nearing an intersection
+    const fx = Math.sin(player.heading), fz = Math.cos(player.heading);
+    let best = null;
+    for (const s of signals) {
+      const dx = s.x - player.pos.x, dz = s.z - player.pos.z;
+      const ahead = dx * fx + dz * fz;
+      const lat = Math.abs(dx * fz - dz * fx);
+      if (lat > 10 || ahead < -6 || ahead > 55) continue;
+      if (!best || ahead < best.ahead) best = { ahead };
+    }
+    if (best) {
+      const axis = Math.abs(fx) > Math.abs(fz) ? 1 : 0;
+      const st = states[axis];
+      sigWinEl.style.display = 'flex';
+      for (const k of ['g', 'y', 'r']) sigLampEls[k].classList.toggle('on', st === k);
+    } else {
+      sigWinEl.style.display = 'none';
+    }
+    return states;
+  }
+
+  // Distance to the stop line of a red/yellow signal ahead of an AI car,
+  // or Infinity when the way is clear.
+  function aiStopDistance(ai, states) {
+    const fx = Math.sin(ai.heading), fz = Math.cos(ai.heading);
+    const axis = Math.abs(fx) > Math.abs(fz) ? 1 : 0;
+    if (states[axis] === 'g') return Infinity;
+    let stop = Infinity;
+    for (const s of signals) {
+      const dx = s.x - ai.pos.x, dz = s.z - ai.pos.z;
+      const ahead = dx * fx + dz * fz;
+      const lat = Math.abs(dx * fz - dz * fx);
+      if (lat > 8 || ahead < 0 || ahead > 32) continue;
+      const crossHalf = axis === 0 ? s.hw / 2 : s.vw / 2;
+      const line = ahead - crossHalf - 3;
+      if (line < -1) continue;                        // already in the box: clear it
+      if (states[axis] === 'y' && line < 3) continue; // yellow, too late to stop
+      stop = Math.min(stop, line);
+    }
+    return stop;
+  }
+
+  function distToDiag(x, z, d) {
+    return Math.abs((x - d.cx) * Math.cos(d.yaw) - (z - d.cz) * Math.sin(d.yaw));
+  }
+  function onAnyRoad(x, z, margin) {
+    for (const r of V_ROADS) if (Math.abs(x - r.pos) < r.w / 2 + margin && Math.abs(z) < ROAD_LEN / 2) return true;
+    for (const r of H_ROADS) if (Math.abs(z - r.pos) < r.w / 2 + margin && Math.abs(x) < ROAD_LEN / 2) return true;
+    for (const d of DIAGS) if (distToDiag(x, z, d) < d.w / 2 + margin) return true;
+    const rr = (4 + margin + 3) * (4 + margin + 3);   // route samples are ~5 m apart
+    for (const p of forestLoop) if ((p.x - x) * (p.x - x) + (p.z - z) * (p.z - z) < rr) return true;
+    for (const p of connector) if ((p.x - x) * (p.x - x) + (p.z - z) * (p.z - z) < rr) return true;
+    return false;
+  }
+
+  // ----- blocks: 2 or 4 buildings each, fronts facing the road -----
+  const BUILDING_COLORS = [0xb8b0a4, 0x9aa4ad, 0xc4b49a, 0xa8b89e, 0xbfa3a0, 0x93a0b5];
+  function placeBuildings(voxMeshes) {
+    const boxGeoCache = [];
+    for (let i = 0; i + 1 < V_ROADS.length; i++) {
+      for (let j = 0; j + 1 < H_ROADS.length; j++) {
+        const x1 = V_ROADS[i].pos + V_ROADS[i].w / 2 + 2;
+        const x2 = V_ROADS[i + 1].pos - V_ROADS[i + 1].w / 2 - 2;
+        const z1 = H_ROADS[j].pos + H_ROADS[j].w / 2 + 2;
+        const z2 = H_ROADS[j + 1].pos - H_ROADS[j + 1].w / 2 - 2;
+        const bw = x2 - x1, bd = z2 - z1;
+        if (bw < 24 || bd < 24) continue;
+
+        const count = cityRnd() < 0.5 ? 2 : 4;
+        let sides = [0, 1, 2, 3];                    // +Z, -Z, +X, -X edge of block
+        if (count === 2) {
+          const first = Math.floor(cityRnd() * 4);
+          sides = [first, first ^ 1];                // opposite pair
+        }
+        for (const side of sides) {
+          const w = 8 + cityRnd() * 6;               // frontage
+          const d2 = 8 + cityRnd() * 5;              // depth
+          const h = 6 + cityRnd() * 12;
+          const cx0 = (x1 + x2) / 2, cz0 = (z1 + z2) / 2;
+          const jw = (side < 2 ? bw : bd) / 2 - w / 2 - 2;
+          const jit = (cityRnd() * 2 - 1) * Math.max(0, jw);
+          let x, z, yaw;
+          if (side === 0) { x = cx0 + jit; z = z2 - d2 / 2 - 1.5; yaw = 0; }
+          else if (side === 1) { x = cx0 + jit; z = z1 + d2 / 2 + 1.5; yaw = Math.PI; }
+          else if (side === 2) { x = x2 - d2 / 2 - 1.5; z = cz0 + jit; yaw = Math.PI / 2; }
+          else { x = x1 + d2 / 2 + 1.5; z = cz0 + jit; yaw = -Math.PI / 2; }
+
+          let bad = false;
+          for (const dg of DIAGS) if (distToDiag(x, z, dg) < dg.w / 2 + (w + d2) / 2) bad = true;
+          for (const o of obstacles) {
+            const rr = o.r + (w + d2) / 4;
+            if ((o.x - x) * (o.x - x) + (o.z - z) * (o.z - z) < rr * rr) bad = true;
+          }
+          if (bad) continue;
+
+          let mesh;
+          // vox の建物があっても箱と混ぜて配置する
+          if (voxMeshes && voxMeshes.length && cityRnd() < 0.6) {
+            mesh = voxMeshes[Math.floor(cityRnd() * voxMeshes.length)].clone();
+          } else {
+            const geo = new THREE.BoxGeometry(w, h, d2);
+            boxGeoCache.push(geo);
+            mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({
+              color: BUILDING_COLORS[Math.floor(cityRnd() * BUILDING_COLORS.length)],
+            }));
+            mesh.position.y = h / 2;
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+          }
+          const holder = new THREE.Group();
+          holder.add(mesh);
+          holder.position.set(x, 0, z);
+          holder.rotation.y = yaw;                   // front (+Z) faces the road
+          scene.add(holder);
+          obstacles.push({ x, z, r: (w + d2) / 4 });
+        }
+      }
+    }
   }
 
   // --------------------------------------------------------------- HUD ----
@@ -190,7 +530,7 @@
       for (const side of [-0.75, 0.75]) {
         const m = skidPool[skidIdx];
         skidIdx = (skidIdx + 1) % SKID_MAX;
-        m.position.set(rx + sx * side, 0.025 + (skidIdx % 8) * 0.0012, rz + sz * side);
+        m.position.set(rx + sx * side, 0.11 + (skidIdx % 8) * 0.0012, rz + sz * side);
         m.rotation.y = player.heading;
         m.material.opacity = 0.5;
         m.visible = true;
@@ -256,8 +596,7 @@
     drifting: false,
   };
 
-  const aiCars = []; // { group, loop, theta, radius }
-  const trees = [];  // { x, z, r }
+  const aiCars = []; // { group, tilt, pos, heading, v, base, wps, idx, radius }
 
   // ------------------------------------------------------------- camera ---
   const cam = { yaw: 0, pitch: 0.34, dist: 10, dragging: false, lastDrag: 0 };
@@ -305,7 +644,7 @@
       new THREE.MeshBasicMaterial({ map: blobTex, transparent: true, depthWrite: false })
     );
     blob.rotation.x = -Math.PI / 2;
-    blob.position.y = 0.015;
+    blob.position.y = 0.12;          // above the road surface + markings
     return blob;
   }
 
@@ -322,33 +661,85 @@
   }
 
   function scatterTrees(meshes, rnd) {
-    const COUNT = 90;
-    let attempts = 0;
-    while (trees.length < COUNT && attempts++ < 4000) {
-      const x = (rnd() * 2 - 1) * (WORLD_BOUND + 30);
-      const z = (rnd() * 2 - 1) * (WORLD_BOUND + 30);
-      const d = Math.hypot(x, z);
-      if (d < 16) continue;                                  // spawn area
-      let onLoop = false;
-      for (const loop of AI_LOOPS) {
-        if (Math.abs(d - loop.r) < 7) { onLoop = true; break; }
-      }
-      if (onLoop) continue;
-      let near = false;
-      for (const t of trees) {
-        if ((t.x - x) * (t.x - x) + (t.z - z) * (t.z - z) < 12 * 12) { near = true; break; }
-      }
-      if (near) continue;
+    // Instancing keeps draw calls low, but one huge InstancedMesh defeats
+    // frustum culling — so the forest is split into sectors around the loop.
+    const SECTORS = 12;
+    const cityLists = meshes.map(() => []);
+    const sectorLists = [];
+    for (let i = 0; i < SECTORS; i++) sectorLists.push(meshes.map(() => []));
 
-      const src = meshes[Math.floor(rnd() * meshes.length)];
-      const tree = src.clone();
+    function tryPlace(lists, x, z, roadMargin, spacing) {
+      if (onAnyRoad(x, z, roadMargin)) return false;
+      for (const o of obstacles) {
+        const rr = o.r + spacing;
+        if ((o.x - x) * (o.x - x) + (o.z - z) * (o.z - z) < rr * rr) return false;
+      }
       const s = 0.75 + rnd() * 0.6;
-      tree.scale.setScalar(s);
-      tree.position.set(x, 0, z);
-      tree.rotation.y = rnd() * Math.PI * 2;
-      scene.add(tree);
-      trees.push({ x, z, r: 0.9 * s });
+      lists[Math.floor(rnd() * meshes.length)].push({ x, z, s, rot: rnd() * Math.PI * 2 });
+      obstacles.push({ x, z, r: 0.9 * s });
+      return true;
     }
+
+    // sparse trees around the city
+    let placed = 0, attempts = 0;
+    while (placed < 60 && attempts++ < 6000) {
+      const x = -310 + rnd() * 620;
+      const z = (rnd() * 2 - 1) * 310;
+      if (tryPlace(cityLists, x, z, 3, 4)) placed++;
+    }
+    // dense woods hugging the forest course
+    placed = 0; attempts = 0;
+    while (placed < 220 && attempts++ < 20000) {
+      const p = forestLoop[Math.floor(rnd() * forestLoop.length)];
+      const ang = rnd() * Math.PI * 2;
+      const d = 7 + rnd() * 55;
+      const x = p.x + Math.cos(ang) * d;
+      const z = p.z + Math.sin(ang) * d;
+      if (x < 330 || x > BOUND_X_MAX || Math.abs(z) > BOUND_Z) continue;
+      const sector = Math.floor(((Math.atan2(z - FOREST_C.z, x - FOREST_C.x) + Math.PI) / (Math.PI * 2)) * SECTORS) % SECTORS;
+      if (tryPlace(sectorLists[sector], x, z, 2.5, 2.5)) placed++;
+    }
+
+    const m4 = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0);
+    function buildInstanced(mesh, list) {
+      if (!list.length) return;
+      const inst = new THREE.InstancedMesh(mesh.geometry, mesh.material, list.length);
+      list.forEach((p, i) => {
+        q.setFromAxisAngle(up, p.rot);
+        m4.compose(new THREE.Vector3(p.x, 0, p.z), q, new THREE.Vector3(p.s, p.s, p.s));
+        inst.setMatrixAt(i, m4);
+      });
+      inst.computeBoundingSphere();
+      inst.castShadow = true;
+      inst.receiveShadow = true;
+      scene.add(inst);
+    }
+    meshes.forEach((mesh, t) => {
+      buildInstanced(mesh, cityLists[t]);
+      for (const lists of sectorLists) buildInstanced(mesh, lists[t]);
+    });
+  }
+
+  // Waypoints for a rectangular circuit over the grid, shifted into the
+  // left lane of each leg (left-hand traffic).
+  function rectLoop(xa, xb, za, zb, cw) {
+    const cs = cw
+      ? [[xa, za], [xb, za], [xb, zb], [xa, zb]]
+      : [[xa, za], [xa, zb], [xb, zb], [xb, za]];
+    const wps = [];
+    for (let i = 0; i < 4; i++) {
+      const p = cs[i], prev = cs[(i + 3) % 4], next = cs[(i + 1) % 4];
+      const din = { x: Math.sign(p[0] - prev[0]), z: Math.sign(p[1] - prev[1]) };
+      const dout = { x: Math.sign(next[0] - p[0]), z: Math.sign(next[1] - p[1]) };
+      const leftIn = { x: din.z, z: -din.x };
+      const leftOut = { x: dout.z, z: -dout.x };
+      const vLeft = din.x === 0 ? leftIn : leftOut;   // left of the vertical leg
+      const hLeft = din.x === 0 ? leftOut : leftIn;   // left of the horizontal leg
+      wps.push({ x: p[0] + vLeft.x * LANE_OFF, z: p[1] + hLeft.z * LANE_OFF });
+    }
+    return wps;
   }
 
   async function init() {
@@ -363,19 +754,51 @@
     const p = makeCarGroup(volvo);
     player.group = p.group;
     player.tilt = p.tilt;
-    player.heading = Math.PI / 2;    // face +X down between the loops
+    // spawn in the left lane of a central vertical road, heading +Z
+    const spawnRoad = V_ROADS[Math.floor(V_ROADS.length / 2)];
+    player.pos.set(spawnRoad.pos + LANE_OFF, 0, 30);
+    player.heading = 0;
 
-    const aiMeshes = [nissan, vw];
-    AI_LOOPS.forEach((loop, i) => {
+    // waypoints along a sampled route, shifted into the left lane
+    function routeWps(pts, step) {
+      const wps = [];
+      for (let i = 0; i < pts.length; i += step) {
+        const p = pts[i], q = pts[(i + step) % pts.length];
+        const dx = q.x - p.x, dz = q.z - p.z;
+        const l = Math.hypot(dx, dz) || 1;
+        wps.push({ x: p.x + (dz / l) * LANE_OFF, z: p.z - (dx / l) * LANE_OFF });
+      }
+      return wps;
+    }
+
+    const vLast = V_ROADS.length - 1, hLast = H_ROADS.length - 1;
+    const loops = [
+      { wps: rectLoop(V_ROADS[1].pos, V_ROADS[Math.min(2, vLast)].pos, H_ROADS[1].pos, H_ROADS[Math.min(2, hLast)].pos, true), base: 8 },
+      { wps: rectLoop(V_ROADS[0].pos, V_ROADS[vLast].pos, H_ROADS[0].pos, H_ROADS[hLast].pos, false), base: 11 },
+      { wps: routeWps(forestLoop, 5), base: 12 },
+      { wps: rectLoop(V_ROADS[Math.min(2, vLast)].pos, V_ROADS[vLast].pos, H_ROADS[0].pos, H_ROADS[Math.min(2, hLast)].pos, true), base: 9 },
+    ];
+    const aiMeshes = [nissan, vw, nissan.clone(), vw.clone()];
+    loops.forEach((loop, i) => {
       const g = makeCarGroup(aiMeshes[i]);
-      aiCars.push({ group: g.group, tilt: g.tilt, loop, theta: Math.PI * (0.4 + i), radius: 1.5 });
+      const start = loop.wps[0];
+      aiCars.push({
+        group: g.group, tilt: g.tilt,
+        pos: new THREE.Vector3(start.x, 0, start.z),
+        heading: 0, v: 0, base: loop.base,
+        wps: loop.wps, idx: 1, radius: 1.5,
+      });
     });
 
+    const buildingMeshes = BUILDING_VOX.length
+      ? await Promise.all(BUILDING_VOX.map((u) => VOX.load(u, { scale: VOXEL_SCALE })))
+      : null;
+    placeBuildings(buildingMeshes);
     scatterTrees([tree1, tree2], mulberry32(20260711));
     initFx();
 
     document.getElementById('loading').remove();
-    window.__voxDrive = { player };   // debug / test hook
+    window.__voxDrive = { player, aiCars };   // debug / test hook
     requestAnimationFrame(tick);
   }
 
@@ -441,8 +864,11 @@
     player.pos.z += player.vel.z * dt;
 
     // world bounds
-    if (Math.abs(player.pos.x) > WORLD_BOUND) { player.pos.x = clamp(player.pos.x, -WORLD_BOUND, WORLD_BOUND); player.vel.x *= -0.3; }
-    if (Math.abs(player.pos.z) > WORLD_BOUND) { player.pos.z = clamp(player.pos.z, -WORLD_BOUND, WORLD_BOUND); player.vel.z *= -0.3; }
+    if (player.pos.x < BOUND_X_MIN || player.pos.x > BOUND_X_MAX) {
+      player.pos.x = clamp(player.pos.x, BOUND_X_MIN, BOUND_X_MAX);
+      player.vel.x *= -0.3;
+    }
+    if (Math.abs(player.pos.z) > BOUND_Z) { player.pos.z = clamp(player.pos.z, -BOUND_Z, BOUND_Z); player.vel.z *= -0.3; }
 
     // collisions: push out of the obstacle and reflect the velocity off it
     function collideCircle(cx, cz, r) {
@@ -461,7 +887,7 @@
         player.vel.multiplyScalar(0.5);
       }
     }
-    for (const t of trees) collideCircle(t.x, t.z, t.r);
+    for (const o of obstacles) collideCircle(o.x, o.z, o.r);
     for (const ai of aiCars) collideCircle(ai.group.position.x, ai.group.position.z, ai.radius);
 
     // visuals
@@ -499,17 +925,33 @@
     rpmEl.classList.toggle('red', rpm > 0.93);
   }
 
-  function updateAI(dt) {
+  function updateAI(dt, sigStates) {
     for (const ai of aiCars) {
-      ai.theta += (ai.loop.speed / ai.loop.r) * ai.loop.dir * dt;
-      const x = Math.cos(ai.theta) * ai.loop.r;
-      const z = Math.sin(ai.theta) * ai.loop.r;
-      // velocity direction = d(pos)/dtheta * dir
-      const vx = -Math.sin(ai.theta) * ai.loop.dir;
-      const vz = Math.cos(ai.theta) * ai.loop.dir;
-      ai.group.position.set(x, 0, z);
-      ai.group.rotation.y = Math.atan2(vx, vz);
-      ai.tilt.rotation.z = 0.02 * ai.loop.dir;
+      const wp = ai.wps[ai.idx];
+      const dx = wp.x - ai.pos.x, dz = wp.z - ai.pos.z;
+      if (dx * dx + dz * dz < 6 * 6) ai.idx = (ai.idx + 1) % ai.wps.length;
+
+      let diff = Math.atan2(dx, dz) - ai.heading;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      ai.heading += clamp(diff, -1.7 * dt, 1.7 * dt);
+
+      // slow down for corners
+      let target = ai.base * (1 - 0.72 * Math.min(1, Math.abs(diff) * 1.4));
+      // obey the signals: brake to a halt at the stop line on red/yellow
+      const stop = aiStopDistance(ai, sigStates);
+      let rate = 1.6;
+      if (stop < 22) {
+        target = Math.min(target, Math.max(0, (stop - 1.5) * 0.7));
+        rate = 3.5;
+      }
+      ai.v += (target - ai.v) * Math.min(1, dt * rate);
+      ai.pos.x += Math.sin(ai.heading) * ai.v * dt;
+      ai.pos.z += Math.cos(ai.heading) * ai.v * dt;
+
+      ai.group.position.copy(ai.pos);
+      ai.group.rotation.y = ai.heading;
+      ai.tilt.rotation.z = clamp(-diff * ai.v * 0.006, -0.04, 0.04);
     }
   }
 
@@ -538,8 +980,9 @@
   function tick(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
+    const sigStates = updateSignals(now / 1000);
     updatePlayer(dt);
-    updateAI(dt);
+    updateAI(dt, sigStates);
     updateFx(dt);
     updateCamera(dt);
     renderer.render(scene, camera);
