@@ -14,13 +14,14 @@ import { AUDIO } from './audio.js';
 (function () {
   'use strict';
 
-  // マップ選択: デフォルトは日本橋 (nihonbashi.gltf)。
+  // マップ選択: デフォルトは自動生成の街 + 森 + 峠。
+  //   ?map=nihonbashi.gltf … 日本橋マップを読む
   //   ?map=maps/sample.glb … 別の glTF/GLB マップを読む
-  //   ?map=city            … 従来の自動生成の街 + 森(詳細は README)
+  //   ?map=city            … デフォルトと同じ自動生成マップ
   const mapParam = new URLSearchParams(location.search).get('map');
-  const MAP_GLTF = mapParam === null
-    ? 'nihonbashi.gltf'
-    : (['city', 'procedural', 'none', '0'].includes(mapParam) ? '' : mapParam);
+  const MAP_GLTF = mapParam === null || ['', 'city', 'procedural', 'none', '0'].includes(mapParam)
+    ? ''
+    : mapParam;
   let mapRoot = null;              // set when a custom map is loaded (ground raycasts)
 
   let BOUND_X_MIN = -290;          // playable area (m); extends east into the forest
