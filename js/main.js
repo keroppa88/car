@@ -620,7 +620,7 @@ import { AUDIO } from './audio.js';
     heading: 0,
     steer: 0,
     gear: 2,         // start in 1st
-    radius: 1.5,
+    radius: 1.05,    // 接地影の横幅の半分 ≒ 実車幅の半分(CAR_SHADOW.w / 2)
     accSmooth: 0,
     drifting: false,
   };
@@ -715,8 +715,12 @@ import { AUDIO } from './audio.js';
   // --------------------------------------------------------------- init ---
   // Soft contact shadow that sits directly under a car at all times —
   // the directional shadow alone lands beside the body when the sun is low.
+  // 車体の実サイズにほぼ合わせた接地影。幅=横, 奥行き=縦(進行方向)。
+  const CAR_SHADOW = { w: 2.1, h: 4.6 };
+  // kabu(スーパーカブ)はバイク。影はタイヤ一個分くらいの小さく細いものに。
+  const BIKE_SHADOW = { w: 0.75, h: 2.0 };
   let blobTex = null;
-  function makeBlobShadow() {
+  function makeBlobShadow(size) {
     if (!blobTex) {
       const cv = document.createElement('canvas');
       cv.width = cv.height = 128;
@@ -729,8 +733,9 @@ import { AUDIO } from './audio.js';
       ctx.fillRect(0, 0, 128, 128);
       blobTex = new THREE.CanvasTexture(cv);
     }
+    const s = size || CAR_SHADOW;
     const blob = new THREE.Mesh(
-      new THREE.PlaneGeometry(3.1, 5.9),
+      new THREE.PlaneGeometry(s.w, s.h),
       new THREE.MeshBasicMaterial({ map: blobTex, transparent: true, depthWrite: false })
     );
     blob.rotation.x = -Math.PI / 2;
@@ -738,7 +743,7 @@ import { AUDIO } from './audio.js';
     return blob;
   }
 
-  function makeCarGroup(mesh, castShadow) {
+  function makeCarGroup(mesh, castShadow, bike) {
     const tilt = new THREE.Group();
     mesh.rotation.y = MODEL_YAW;
     mesh.position.y = -CAR_SINK;
@@ -747,10 +752,13 @@ import { AUDIO } from './audio.js';
     tilt.add(mesh);
     const group = new THREE.Group();
     group.add(tilt);
-    group.add(makeBlobShadow());
+    group.add(makeBlobShadow(bike ? BIKE_SHADOW : CAR_SHADOW));
     scene.add(group);
     return { group, tilt };
   }
+
+  // 当たり判定の半径は接地影の横幅の半分に合わせる(実車幅とほぼ一致)。
+  const carRadiusFor = (bike) => (bike ? BIKE_SHADOW.w : CAR_SHADOW.w) / 2;
 
   // vox フォルダの CPU 用車種(tree01/tree02 と プレイヤーの volvo 以外すべて)。
   // 街(?map=city)では全種類を道路に走らせる。
@@ -1003,7 +1011,7 @@ import { AUDIO } from './audio.js';
           group: g.group, tilt: g.tilt,
           pos: new THREE.Vector3(wps[0].x, groundHeightAt(wps[0].x, 500, wps[0].z), wps[0].z),
           heading: 0, v: 0, base: 9 + i * 1.5,
-          wps, idx: 1, radius: 1.5,
+          wps, idx: 1, radius: carRadiusFor(false),
         });
       });
       initFx();
@@ -1057,7 +1065,7 @@ import { AUDIO } from './audio.js';
     ];
 
     // ルートの周長に沿って startFrac の位置へ配置(車どうしが重ならないよう分散)
-    function placeOnLoop(wps, mesh, startFrac, base) {
+    function placeOnLoop(wps, mesh, startFrac, base, bike) {
       const seg = [];
       let total = 0;
       for (let i = 0; i < wps.length; i++) {
@@ -1070,19 +1078,23 @@ import { AUDIO } from './audio.js';
       const a = wps[s], b = wps[(s + 1) % wps.length];
       const t = seg[s] ? dist / seg[s] : 0;
       const px = a.x + (b.x - a.x) * t, pz = a.z + (b.z - a.z) * t;
-      const g = makeCarGroup(mesh, false);
+      const g = makeCarGroup(mesh, false, bike);
       aiCars.push({
         group: g.group, tilt: g.tilt,
         pos: new THREE.Vector3(px, 0, pz),
         heading: Math.atan2(b.x - a.x, b.z - a.z), v: 0, base,
-        wps, idx: (s + 1) % wps.length, radius: 1.5,
+        wps, idx: (s + 1) % wps.length, radius: carRadiusFor(bike),
       });
     }
 
+    // CPU 車は loopDefs[1] 以外の4コースへ。loopDefs[1] はデモ専用にして、
+    // デモ車が CPU 車と同じコースを延々と並走・追突しないようにする。
+    const cpuLoops = [loopDefs[0], loopDefs[2], loopDefs[3], loopDefs[4]];
     cpuMeshes.forEach((mesh, i) => {
-      const loop = loopDefs[i % loopDefs.length];
+      const bike = /\/kabu\d*\.vox$/.test(CPU_CAR_VOX[i]);   // スーパーカブはバイク
+      const loop = cpuLoops[i % cpuLoops.length];
       const frac = (i * 0.37) % 1;         // ルート上に散らす
-      placeOnLoop(loop, mesh, frac, 7 + (i % 5));   // 25〜40 km/h でばらつき
+      placeOnLoop(loop, mesh, frac, 7 + (i % 5), bike);   // 25〜40 km/h でばらつき
     });
 
     const buildingMeshes = BUILDING_VOX.length
@@ -1092,7 +1104,7 @@ import { AUDIO } from './audio.js';
     scatterTrees([tree1, tree2], mulberry32(20260711));
     initFx();
 
-    enterDemo(loopDefs[1]);   // 1ブロック周回でドリフトデモ
+    enterDemo(loopDefs[1]);   // CPU車のいない専用ブロックでドリフトデモ
     document.getElementById('loading').remove();
     window.__voxDrive = { player, aiCars, start: () => startGame(), inDemo: () => demoActive };
     requestAnimationFrame(tick);
@@ -1247,7 +1259,8 @@ import { AUDIO } from './audio.js';
     player.group.rotation.y = player.heading;
     const acc = (vF - vBefore) / Math.max(dt, 1e-4);
     player.accSmooth += (acc - player.accSmooth) * Math.min(1, dt * 5);
-    player.tilt.rotation.z = clamp(-player.steer * vF * 0.010 - vS * 0.008, -0.09, 0.09);
+    // 車体は外側へロール(右に曲がると左へ, 左に曲がると右へ傾く)
+    player.tilt.rotation.z = clamp(player.steer * vF * 0.010 + vS * 0.008, -0.09, 0.09);
     player.tilt.rotation.x = clamp(player.accSmooth * 0.006, -0.05, 0.05);
 
     // tyre effects while sliding
@@ -1307,7 +1320,7 @@ import { AUDIO } from './audio.js';
 
       ai.group.position.copy(ai.pos);
       ai.group.rotation.y = ai.heading;
-      ai.tilt.rotation.z = clamp(-diff * ai.v * 0.006, -0.04, 0.04);
+      ai.tilt.rotation.z = clamp(diff * ai.v * 0.006, -0.04, 0.04);   // 外側へロール
     }
   }
 
