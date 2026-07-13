@@ -1011,7 +1011,7 @@ import { AUDIO } from './audio.js';
   // 当たり判定の半径は接地影の横幅の半分に合わせる(実車幅とほぼ一致)。
   const carRadiusFor = (bike) => (bike ? BIKE_SHADOW.w : CAR_SHADOW.w) / 2;
 
-  const PLAYER_CAR_VOX = 'vox/toyota86.vox';
+  const PLAYER_CAR_VOX = 'vox/toyota86.vox?v=20260714-1';
 
   // vox フォルダの CPU 用車種(tree01/tree02 と プレイヤーの toyota86 以外すべて)。
   // 街(?map=city)では全種類を道路に走らせる。
