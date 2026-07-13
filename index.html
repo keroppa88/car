@@ -8,7 +8,7 @@
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #8ecbef; }
   canvas { display: block; }
-  #hud, #loading { font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", Meiryo, sans-serif; user-select: none; }
+  #hud, #loading, #map-select { font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", Meiryo, sans-serif; user-select: none; }
 
   #loading {
     position: fixed; inset: 0; z-index: 10;
@@ -17,6 +17,42 @@
   }
   #loading .err { text-align: center; line-height: 2; }
   #loading code { color: #ffd479; }
+
+  /* タイトル / マップ選択 */
+  #map-select {
+    position: fixed; inset: 0; z-index: 20; display: none;
+    align-items: center; justify-content: center; color: #fff;
+    background:
+      linear-gradient(115deg, rgba(7,15,24,0.97), rgba(20,45,62,0.88)),
+      repeating-linear-gradient(90deg, transparent 0 70px, rgba(255,255,255,0.035) 70px 72px);
+  }
+  body.title #map-select { display: flex; }
+  body.title #loading, body.title #demo, body.title #help,
+  body.title #meter, body.title #signal { display: none !important; }
+  .title-card { width: min(760px, calc(100vw - 36px)); text-align: center; }
+  .title-logo {
+    font: 900 clamp(48px, 9vw, 92px)/0.95 "Arial Black", Impact, sans-serif;
+    letter-spacing: 0.08em; font-style: italic;
+    text-shadow: 0 5px 0 #111b24, 0 0 28px rgba(72,205,255,0.42);
+  }
+  .title-sub { margin: 18px 0 28px; color: #a9d9ee; letter-spacing: 0.32em; font-size: 13px; }
+  .map-choices { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+  .map-choice {
+    min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: #fff; text-decoration: none; border: 2px solid rgba(255,255,255,0.35);
+    border-radius: 14px; background: rgba(10,22,31,0.78);
+    box-shadow: 0 12px 28px rgba(0,0,0,0.3); transition: 150ms ease;
+  }
+  .map-choice:hover, .map-choice:focus-visible {
+    transform: translateY(-4px); border-color: #6de0ff; background: rgba(17,48,65,0.94);
+    box-shadow: 0 16px 34px rgba(0,0,0,0.42), 0 0 18px rgba(67,205,255,0.2);
+  }
+  .map-choice strong { font-size: 30px; letter-spacing: 0.14em; }
+  .map-choice span { margin-top: 12px; color: #b9cbd5; font-size: 13px; line-height: 1.6; }
+  @media (max-width: 600px) {
+    .map-choices { grid-template-columns: 1fr; }
+    .map-choice { min-height: 120px; }
+  }
 
   .panel {
     position: fixed; z-index: 5; color: #fff;
@@ -89,6 +125,23 @@
 </style>
 </head>
 <body>
+<div id="map-select">
+  <main class="title-card">
+    <div class="title-logo">VOX DRIVE</div>
+    <div class="title-sub">SELECT MAP</div>
+    <div class="map-choices">
+      <a class="map-choice" href="?map=city">
+        <strong>架空</strong>
+        <span>環状都市・森林コース・峠の連続ヘアピン</span>
+      </a>
+      <a class="map-choice" href="?map=nihonbashi.gltf">
+        <strong>日本橋</strong>
+        <span>日本橋の3DマップをToyota 86で走行</span>
+      </a>
+    </div>
+  </main>
+</div>
+
 <div id="loading">LOADING&hellip; 車を組み立て中</div>
 
 <div id="demo">
@@ -124,6 +177,14 @@
 <script type="importmap">
 { "imports": { "three": "./lib/three.module.js" } }
 </script>
-<script type="module" src="js/main.js"></script>
+<script type="module">
+  const mapParam = new URLSearchParams(location.search).get('map');
+  if (mapParam === null) {
+    document.body.classList.add('title');
+  } else {
+    document.getElementById('map-select').remove();
+    import('./js/main.js');
+  }
+</script>
 </body>
 </html>
