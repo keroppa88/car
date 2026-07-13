@@ -3,8 +3,8 @@
  *
  * Engine: two detuned sawtooth oscillators + a sub-octave square through a
  * lowpass filter. Each gear has its own frequency band; the pitch climbs
- * through the band as the revs rise, and every higher gear's band sits
- * above the previous one (1st is intentionally very low).
+ * through the band as the revs rise. The 5th gear intentionally reuses
+ * the 4th-gear band so cruising never becomes excessively high-pitched.
  *
  * Tyre screech: looped white noise through two parallel bandpass filters
  * with an LFO wobble — used both for drifting and for hard braking.
@@ -17,17 +17,18 @@ function audioModule() {
   //   1: 40-95  (かなり低く)   mid 67.5
   //   2: 67.5-147.5            mid 107.5
   //   3: 107.5-217.5           mid 162.5
-  //   4: 162.5-312.5           mid 237.5
-  //   5: 237.5-437.5
+  //   4: 162.5-312.5
+  //   5: 162.5-312.5 (4速と同じ音域)
   const FREQS = (() => {
-    const widths = [55, 80, 110, 150, 200];   // 1速〜5速の音域幅
+    const widths = [55, 80, 110, 150];        // 1速〜4速の音域幅
     let lo = 40;
     const bands = [];
     for (const w of widths) {
       bands.push([lo, lo + w]);
       lo += w / 2;                            // 次のギアは真ん中の音から始まる
     }
-    return [bands[0], bands[0], ...bands];    // R と N は1速と同じ低い音域
+    const driveBands = [...bands, [...bands[3]]]; // 5速は4速の音をそのまま使う
+    return [bands[0], bands[0], ...driveBands];   // R と N は1速と同じ低い音域
   })();
 
   let ctx = null;
