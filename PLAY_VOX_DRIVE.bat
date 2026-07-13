@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title VOX DRIVE - Local Server
+title INITIAL T - Local Server
 
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0local-server.ps1"
 
