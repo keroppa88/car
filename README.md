@@ -103,11 +103,13 @@ python3 -m http.server 8000
 
 ## マップ
 
-**デフォルトは日本橋(`nihonbashi.gltf`)。** URL パラメータで切り替えられる:
+ルートURLではタイトル画面が開き、**「架空」または「日本橋」**を選択できる。
+URL パラメータで直接開始することもできる:
 
 ```
-http://localhost:8000/                        … 日本橋(デフォルト)
-http://localhost:8000/?map=city              … 自動生成の街 + 森 + 信号
+http://localhost:8000/                        … タイトル / マップ選択
+http://localhost:8000/?map=city              … 架空都市 + 森 + 信号 + 峠
+http://localhost:8000/?map=nihonbashi.gltf   … 日本橋
 http://localhost:8000/?map=maps/sample.glb   … 任意の glTF/GLB マップ
 ```
 
