@@ -41,6 +41,7 @@ import { AUDIO } from './audio.js';
   // ユーザーが何か操作するとゲーム開始。
   let demoActive = false;
   let startGame = function () {};   // init 内で本体を差し込む
+  let gameSpawn = null;             // デモ解除時に戻る通常スポーン {x,z,heading}
 
   // ------------------------------------------------------------- input ----
   const keys = {};
@@ -133,8 +134,9 @@ import { AUDIO } from './audio.js';
   scene.add(sun.target);
   const SUN_DIR = new THREE.Vector3(28, 90, 18).normalize();
 
+  // 分割数を持たせ、あとでドリフトコースの丘だけ頂点を持ち上げる(街の坂道)。
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(2400, 1400),
+    new THREE.PlaneGeometry(2400, 1400, 240, 140),
     new THREE.MeshLambertMaterial({ map: makeGroundTexture() })
   );
   ground.rotation.x = -Math.PI / 2;
@@ -170,6 +172,16 @@ import { AUDIO } from './audio.js';
     const base = this.pos.length / 3;
     for (const [x, z] of [[-w / 2, -l / 2], [w / 2, -l / 2], [w / 2, l / 2], [-w / 2, l / 2]]) {
       this.pos.push(cx + x * c + z * s, y, cz - x * s + z * c);
+    }
+    this.idx.push(base, base + 2, base + 1, base, base + 3, base + 2);
+  };
+  // 起伏に沿った矩形: 各コーナーの高さを hFn(worldX, worldZ)+lift で決める。
+  QuadBatch.prototype.addSloped = function (cx, cz, w, l, yaw, hFn, lift) {
+    const c = Math.cos(yaw), s = Math.sin(yaw);
+    const base = this.pos.length / 3;
+    for (const [x, z] of [[-w / 2, -l / 2], [w / 2, -l / 2], [w / 2, l / 2], [-w / 2, l / 2]]) {
+      const wx = cx + x * c + z * s, wz = cz - x * s + z * c;
+      this.pos.push(wx, hFn(wx, wz) + lift, wz);
     }
     this.idx.push(base, base + 2, base + 1, base, base + 3, base + 2);
   };
@@ -300,10 +312,99 @@ import { AUDIO } from './audio.js';
   patches.add(connector[0].x, connector[0].z, 10, 10, 0, 0.095);          // junction mouths
   patches.add(connector[8].x, connector[8].z, 11, 11, Math.PI / 4, 0.095);
 
+  // ----- drift course (街の南): ヘアピン(Uターン)が連続する練習コース + 緩い坂 -----
+  // ジグザグに折り返す蛇行レイアウトで、タイトな 180°ターンが多くドリフト向き。
+  const DRIFT_C = { x: -30, z: 460 };
+  // 街モードの地面高さ。ドリフトコース周辺だけ緩やかな丘、それ以外は 0(平坦)。
+  // グリッドの道路(z<=330付近)には一切影響させない。
+  function courseHeightAt(x, z) {
+    const gz = (z - 350) / 45;                 // z=350 で 0 -> 395 で 1(道路側を保護)
+    if (gz <= 0) return 0;
+    const gateN = Math.min(1, gz);
+    const gateS = Math.max(0, Math.min(1, (610 - z) / 45));   // 南端で滑らかに 0
+    const gateX = Math.max(0, Math.min((x + 300) / 55, (215 - x) / 55, 1));
+    const roll = 3.4 + 3.4 * Math.sin(x * 0.018) + 2.8 * Math.sin(z * 0.028 + 0.7);
+    return Math.max(0, roll) * gateN * gateS * gateX;
+  }
+
+  function driftLoop() {
+    const pts = [];
+    const x0 = DRIFT_C.x - 150, x1 = DRIFT_C.x + 150, R = 20, rows = 6, gap = 2 * R;
+    const zTop = DRIFT_C.z - ((rows - 1) / 2) * gap;
+    const arc = (ccx, ccz, a0, a1, steps) => {
+      for (let i = 1; i <= steps; i++) {
+        const a = a0 + (a1 - a0) * (i / steps);
+        pts.push({ x: ccx + Math.cos(a) * R, z: ccz + Math.sin(a) * R });
+      }
+    };
+    for (let r = 0; r < rows; r++) {
+      const z = zTop + r * gap;
+      const l2r = r % 2 === 0;
+      pts.push({ x: l2r ? x0 : x1, z });
+      pts.push({ x: l2r ? x1 : x0, z });
+      if (r < rows - 1) {                 // タイトなヘアピンで次の直線へ折り返す
+        if (l2r) arc(x1, z + R, -Math.PI / 2, Math.PI / 2, 8);        // 東側で U ターン
+        else arc(x0, z + R, -Math.PI / 2, -Math.PI * 3 / 2, 8);       // 西側で U ターン
+      }
+    }
+    // 最終行(西端)から先頭行へ、西側を大きく回り込んで閉じる(もう1つの U ターン)
+    const zEnd = zTop + (rows - 1) * gap, BR = (zEnd - zTop) / 2;
+    for (let i = 1; i <= 18; i++) {
+      const a = Math.PI / 2 + (Math.PI) * (i / 18);   // +90° -> +270°(西側へ膨らむ)
+      pts.push({ x: x0 + Math.cos(a) * BR, z: (zTop + zEnd) / 2 + Math.sin(a) * BR });
+    }
+    return pts;
+  }
+  const driftLoopPts = driftLoop();
+
+  // 起伏に沿ってコースを舗装(長い直線は分割して丘に追従させる)。
+  function paveCourse(pts) {
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i], q = pts[(i + 1) % pts.length];
+      const dx = q.x - p.x, dz = q.z - p.z, len = Math.hypot(dx, dz);
+      if (len < 0.01) continue;
+      const yaw = Math.atan2(dx, dz), c = Math.cos(yaw), s = Math.sin(yaw);
+      const steps = Math.max(1, Math.round(len / 8));
+      for (let k = 0; k < steps; k++) {
+        const t0 = k / steps, t1 = (k + 1) / steps;
+        const ax = p.x + dx * t0, az = p.z + dz * t0;
+        const bx = p.x + dx * t1, bz = p.z + dz * t1;
+        const mx = (ax + bx) / 2, mz = (az + bz) / 2, sl = len / steps;
+        asphalt.addSloped(mx, mz, 9, sl + 0.6, yaw, courseHeightAt, 0.04);
+        paint.addSloped(mx + 4.3 * c, mz - 4.3 * s, 0.16, sl + 0.4, yaw, courseHeightAt, 0.07);
+        paint.addSloped(mx - 4.3 * c, mz + 4.3 * s, 0.16, sl + 0.4, yaw, courseHeightAt, 0.07);
+        if (k % 2 === 0) paint.addSloped(mx, mz, 0.16, sl * 0.6, yaw, courseHeightAt, 0.07);  // 中央破線
+      }
+    }
+  }
+
   if (!MAP_GLTF) {
+    BOUND_Z = 620;                   // 南のドリフトコースまで走れるように拡張
+    paveCourse(driftLoopPts);
+    // グリッド道路とドリフトコースをつなぐ短い連絡路
+    {
+      const cand = V_ROADS.map((r) => r.pos).filter((px) => px >= DRIFT_C.x - 150 && px <= DRIFT_C.x + 120);
+      const rx = cand.length ? cand.reduce((a, b) => (Math.abs(b - DRIFT_C.x) < Math.abs(a - DRIFT_C.x) ? b : a)) : DRIFT_C.x;
+      const z0 = 330, z1 = 362, steps = 6;
+      for (let k = 0; k < steps; k++) {
+        const mz = z0 + (z1 - z0) * (k + 0.5) / steps;
+        asphalt.addSloped(rx, mz, 9, (z1 - z0) / steps + 0.4, 0, courseHeightAt, 0.04);
+      }
+      patches.addSloped(rx, z1, 12, 12, 0, courseHeightAt, 0.05);
+    }
     scene.add(asphalt.build(true));
     scene.add(paint.build(false));
     scene.add(patches.build(true));
+
+    // 地面の頂点をコースの丘の高さへ持ち上げる(道路とコースが同じ起伏に乗る)。
+    const gpos = ground.geometry.attributes.position;
+    for (let i = 0; i < gpos.count; i++) {
+      const wx = gpos.getX(i) + ground.position.x;   // ローカル->ワールド X
+      const wz = -gpos.getY(i);                       // ローカル Y -> ワールド Z
+      gpos.setZ(i, courseHeightAt(wx, wz));            // ローカル Z -> ワールド Y
+    }
+    gpos.needsUpdate = true;
+    ground.geometry.computeVertexNormals();
   } else {
     signals.length = 0;              // カスタムマップに自動生成の信号は無い
     ground.position.y = -0.08;       // マップ自身の地面の下に敷く保険
@@ -1035,6 +1136,8 @@ import { AUDIO } from './audio.js';
     const spawnRoad = V_ROADS[Math.floor(V_ROADS.length / 2)];
     player.pos.set(spawnRoad.pos + LANE_OFF, 0, 30);
     player.heading = 0;
+    // ゲーム開始時(デモ解除時)に戻す通常スポーン
+    gameSpawn = { x: spawnRoad.pos + LANE_OFF, z: 30, heading: 0 };
 
     // waypoints along a sampled route, shifted into the left lane
     function routeWps(pts, step) {
@@ -1087,12 +1190,10 @@ import { AUDIO } from './audio.js';
       });
     }
 
-    // CPU 車は loopDefs[1] 以外の4コースへ。loopDefs[1] はデモ専用にして、
-    // デモ車が CPU 車と同じコースを延々と並走・追突しないようにする。
-    const cpuLoops = [loopDefs[0], loopDefs[2], loopDefs[3], loopDefs[4]];
+    // CPU 車をグリッドの5コースへ散らす(デモは別コースなので全ループを使う)
     cpuMeshes.forEach((mesh, i) => {
       const bike = /\/kabu\d*\.vox$/.test(CPU_CAR_VOX[i]);   // スーパーカブはバイク
-      const loop = cpuLoops[i % cpuLoops.length];
+      const loop = loopDefs[i % loopDefs.length];
       const frac = (i * 0.37) % 1;         // ルート上に散らす
       placeOnLoop(loop, mesh, frac, 7 + (i % 5), bike);   // 25〜40 km/h でばらつき
     });
@@ -1104,7 +1205,15 @@ import { AUDIO } from './audio.js';
     scatterTrees([tree1, tree2], mulberry32(20260711));
     initFx();
 
-    enterDemo(loopDefs[1]);   // CPU車のいない専用ブロックでドリフトデモ
+    // ドリフトコースにも CPU 車を2台流す(グリッドの車を奪わないよう clone)
+    placeOnLoop(driftLoopPts, (cpuMeshes[13] || cpuMeshes[0]).clone(), 0.0, 8, false);
+    placeOnLoop(driftLoopPts, (cpuMeshes[22] || cpuMeshes[1]).clone(), 0.5, 7, false);
+
+    // デモは新しいドリフトコースを走ってヘアピンをドリフトで見せる
+    const ds = driftLoopPts[0], dn = driftLoopPts[1];
+    player.pos.set(ds.x, courseHeightAt(ds.x, ds.z), ds.z);
+    player.heading = Math.atan2(dn.x - ds.x, dn.z - ds.z);
+    enterDemo(driftLoopPts);
     document.getElementById('loading').remove();
     window.__voxDrive = { player, aiCars, start: () => startGame(), inDemo: () => demoActive };
     requestAnimationFrame(tick);
@@ -1132,6 +1241,10 @@ import { AUDIO } from './audio.js';
     player.drifting = false;
     player.gear = 2;
     player.steer = 0;
+    if (gameSpawn) {                 // デモの位置(コース上)から通常スポーンへ戻す
+      player.pos.set(gameSpawn.x, courseHeightAt(gameSpawn.x, gameSpawn.z), gameSpawn.z);
+      player.heading = gameSpawn.heading;
+    }
     cam.yaw = 0; cam.pitch = 0.34; cam.dist = 10; cam.lastDrag = 0;
   };
 
@@ -1154,7 +1267,7 @@ import { AUDIO } from './audio.js';
 
   // ------------------------------------------------------------- update ---
   function updatePlayer(dt) {
-    if (demoActive) player.gear = 4;   // デモは3速で回遊
+    if (demoActive) player.gear = 3;   // デモは2速(~40km/h)でヘアピンをドリフト
     // gears
     if (shiftUp) { player.gear = Math.min(player.gear + 1, GEARS.length - 1); shiftUp = false; }
     if (shiftDown) { player.gear = Math.max(player.gear - 1, 0); shiftDown = false; }
@@ -1248,10 +1361,19 @@ import { AUDIO } from './audio.js';
     for (const ai of aiCars) collideCircle(ai.group.position.x, ai.group.position.z, ai.radius);
 
     // custom maps: collide with vertical structures, ride on the surface
+    let slopePitch = 0;
     if (mapRoot) {
       collideWalls(dt);
       const gy = groundHeightAt(player.pos.x, player.pos.y, player.pos.z);
       player.pos.y += (gy - player.pos.y) * Math.min(1, dt * 9);
+    } else {
+      // 街モード: ドリフトコースの坂に乗る(平地では高さ 0 で従来どおり)
+      const gy = courseHeightAt(player.pos.x, player.pos.z);
+      player.pos.y += (gy - player.pos.y) * Math.min(1, dt * 9);
+      const hx = Math.sin(player.heading) * 3, hz = Math.cos(player.heading) * 3;
+      const hF = courseHeightAt(player.pos.x + hx, player.pos.z + hz);
+      const hB = courseHeightAt(player.pos.x - hx, player.pos.z - hz);
+      slopePitch = Math.atan2(hF - hB, 6);   // 登りで + / 下りで -
     }
 
     // visuals
@@ -1261,7 +1383,8 @@ import { AUDIO } from './audio.js';
     player.accSmooth += (acc - player.accSmooth) * Math.min(1, dt * 5);
     // 車体は外側へロール(右に曲がると左へ, 左に曲がると右へ傾く)
     player.tilt.rotation.z = clamp(player.steer * vF * 0.010 + vS * 0.008, -0.09, 0.09);
-    player.tilt.rotation.x = clamp(player.accSmooth * 0.006, -0.05, 0.05);
+    // 加速ピッチ + 坂の傾き(登りは車首上げ)
+    player.tilt.rotation.x = clamp(player.accSmooth * 0.006 - slopePitch, -0.28, 0.28);
 
     // tyre effects while sliding
     if (player.drifting && Math.abs(vS) > 1.6) {
@@ -1315,6 +1438,9 @@ import { AUDIO } from './audio.js';
       ai.pos.z += Math.cos(ai.heading) * ai.v * dt;
       if (mapRoot) {
         const gy = groundHeightAt(ai.pos.x, ai.pos.y, ai.pos.z);
+        ai.pos.y += (gy - ai.pos.y) * Math.min(1, dt * 9);
+      } else {
+        const gy = courseHeightAt(ai.pos.x, ai.pos.z);   // 街の坂に乗る
         ai.pos.y += (gy - ai.pos.y) * Math.min(1, dt * 9);
       }
 
