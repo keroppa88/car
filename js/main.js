@@ -1,5 +1,5 @@
 /*
- * VOX DRIVE — drive a voxel Volvo around a plane scattered with voxel trees,
+ * VOX DRIVE — drive a voxel Toyota 86 around a plane scattered with voxel trees,
  * while two AI cars (180SX / VW) cruise on loops.
  *
  *   A: brake  S: accel  Space: handbrake (drift)
@@ -153,6 +153,7 @@ import { AUDIO } from './audio.js';
   //                                solid edge lines
   //   2-lane (one each way,  w=8): dashed center line, solid edge lines
   const ROAD_LEN = 660;               // roads span the whole map
+  const CITY_EDGE = ROAD_LEN / 2;      // outer ring joins every formerly dead-ended road
   const LANE_OFF = 1.75;              // AI keeps to the left lane (Japan)
 
   // のちに vox の建物を使う場合はここにファイルを追加(モデルの前面 = +Z)。
@@ -215,25 +216,44 @@ import { AUDIO } from './audio.js';
     DIAGS.push({ cx: -40 + cityRnd() * 80, cz: -40 + cityRnd() * 80, yaw: Math.PI / 4, w: 8, four: false });
   }
 
+  // Clip diagonal roads at the outer ring so their two ends also join the circuit.
+  for (const d of DIAGS) {
+    const dirx = Math.sin(d.yaw), dirz = Math.cos(d.yaw);
+    const hits = [];
+    for (const x of [-CITY_EDGE, CITY_EDGE]) {
+      const t = (x - d.cx) / dirx, z = d.cz + t * dirz;
+      if (Math.abs(z) <= CITY_EDGE + 0.01) hits.push(t);
+    }
+    for (const z of [-CITY_EDGE, CITY_EDGE]) {
+      const t = (z - d.cz) / dirz, x = d.cx + t * dirx;
+      if (Math.abs(x) <= CITY_EDGE + 0.01) hits.push(t);
+    }
+    hits.sort((a, b) => a - b);
+    d.t0 = hits[0];
+    d.t1 = hits[hits.length - 1];
+  }
+
   const asphalt = new QuadBatch(0x3d3d42);
   const paint = new QuadBatch(0xe8e8e2);
   const patches = new QuadBatch(0x3d3d42);
+  const driftShoulder = new QuadBatch(0x34363a);
+  const PERIMETER_ROAD = { w: 8, four: false };
 
   // Lane markings for one road, in the road's local frame (length along z).
-  function addMarkings(cx, cz, yaw, road) {
+  function addMarkings(cx, cz, yaw, road, roadLength = ROAD_LEN) {
     const c = Math.cos(yaw), s = Math.sin(yaw);
     const at = (off, w, l, zc) => paint.add(cx + off * c + zc * s, cz - off * s + zc * c, w, l, yaw, 0.06);
     const edge = road.four ? 6.2 : 3.5;
-    at(edge, 0.15, ROAD_LEN, 0);      // 外側線(実線)
-    at(-edge, 0.15, ROAD_LEN, 0);
+    at(edge, 0.15, roadLength, 0);      // 外側線(実線)
+    at(-edge, 0.15, roadLength, 0);
     if (road.four) {
-      at(0, 0.15, ROAD_LEN, 0);       // 中央線(実線)
-      for (let z = -ROAD_LEN / 2; z < ROAD_LEN / 2; z += 8) {  // 車線境界線(破線)
+      at(0, 0.15, roadLength, 0);       // 中央線(実線)
+      for (let z = -roadLength / 2; z < roadLength / 2; z += 8) {  // 車線境界線(破線)
         at(3.1, 0.15, 4, z + 2);
         at(-3.1, 0.15, 4, z + 2);
       }
     } else {
-      for (let z = -ROAD_LEN / 2; z < ROAD_LEN / 2; z += 10) { // 中央線(破線)
+      for (let z = -roadLength / 2; z < roadLength / 2; z += 10) { // 中央線(破線)
         at(0, 0.15, 5, z + 2.5);
       }
     }
@@ -248,8 +268,21 @@ import { AUDIO } from './audio.js';
     addMarkings(0, r.pos, Math.PI / 2, r);
   }
   for (const d of DIAGS) {
-    asphalt.add(d.cx, d.cz, d.w, ROAD_LEN * 1.35, d.yaw, 0.03);
-    addMarkings(d.cx, d.cz, d.yaw, d);
+    const midT = (d.t0 + d.t1) / 2, len = d.t1 - d.t0;
+    const mx = d.cx + Math.sin(d.yaw) * midT;
+    const mz = d.cz + Math.cos(d.yaw) * midT;
+    asphalt.add(mx, mz, d.w, len, d.yaw, 0.03);
+    addMarkings(mx, mz, d.yaw, d, len);
+  }
+
+  // Continuous outer ring: every grid-road endpoint now meets this circuit.
+  for (const z of [-CITY_EDGE, CITY_EDGE]) {
+    asphalt.add(0, z, PERIMETER_ROAD.w, ROAD_LEN + PERIMETER_ROAD.w, Math.PI / 2, 0.03);
+    addMarkings(0, z, Math.PI / 2, PERIMETER_ROAD, ROAD_LEN + PERIMETER_ROAD.w);
+  }
+  for (const x of [-CITY_EDGE, CITY_EDGE]) {
+    asphalt.add(x, 0, PERIMETER_ROAD.w, ROAD_LEN + PERIMETER_ROAD.w, 0, 0.03);
+    addMarkings(x, 0, 0, PERIMETER_ROAD, ROAD_LEN + PERIMETER_ROAD.w);
   }
 
   // Plain asphalt patches hide the markings inside every intersection.
@@ -258,6 +291,25 @@ import { AUDIO } from './audio.js';
     for (const h of H_ROADS) {
       patches.add(v.pos, h.pos, v.w, h.w, 0, 0.09);
       signals.push({ x: v.pos, z: h.pos, vw: v.w, hw: h.w });
+    }
+  }
+  // Join both ends of every vertical/horizontal road to the outer ring.
+  for (const v of V_ROADS) {
+    for (const z of [-CITY_EDGE, CITY_EDGE]) {
+      patches.add(v.pos, z, v.w, PERIMETER_ROAD.w, 0, 0.09);
+      signals.push({ x: v.pos, z, vw: v.w, hw: PERIMETER_ROAD.w });
+    }
+  }
+  for (const h of H_ROADS) {
+    for (const x of [-CITY_EDGE, CITY_EDGE]) {
+      patches.add(x, h.pos, PERIMETER_ROAD.w, h.w, 0, 0.09);
+      signals.push({ x, z: h.pos, vw: PERIMETER_ROAD.w, hw: h.w });
+    }
+  }
+  for (const x of [-CITY_EDGE, CITY_EDGE]) {
+    for (const z of [-CITY_EDGE, CITY_EDGE]) {
+      patches.add(x, z, 10, 10, 0, 0.095);
+      signals.push({ x, z, vw: PERIMETER_ROAD.w, hw: PERIMETER_ROAD.w });
     }
   }
   for (const d of DIAGS) {
@@ -272,6 +324,9 @@ import { AUDIO } from './audio.js';
       const x = d.cx + t * dirx;
       if (Math.abs(x) < 320) patches.add(x, h.pos, d.w, h.w / Math.abs(dirx) + d.w, d.yaw, 0.095);
     }
+    for (const t of [d.t0, d.t1]) {
+      patches.add(d.cx + dirx * t, d.cz + dirz * t, 12, 12, d.yaw, 0.095);
+    }
   }
 
   // ----- forest course (suburb, east of the city) -----
@@ -282,7 +337,11 @@ import { AUDIO } from './audio.js';
   const FOREST_N = 220;
   for (let i = 0; i < FOREST_N; i++) {
     const th = (i / FOREST_N) * Math.PI * 2;
-    const r = 150 + 45 * Math.sin(3 * th) + 25 * Math.sin(7 * th + 1.3);
+    // Multiple harmonics create frequent linked bends without self-intersection.
+    const r = 150
+      + 34 * Math.sin(3 * th)
+      + 24 * Math.sin(7 * th + 1.3)
+      + 14 * Math.sin(13 * th + 0.45);
     forestLoop.push({ x: FOREST_C.x + Math.cos(th) * r, z: FOREST_C.z + Math.sin(th) * r });
   }
   const connector = [];               // straight link: city edge -> loop start
@@ -312,96 +371,160 @@ import { AUDIO } from './audio.js';
   patches.add(connector[0].x, connector[0].z, 10, 10, 0, 0.095);          // junction mouths
   patches.add(connector[8].x, connector[8].z, 11, 11, Math.PI / 4, 0.095);
 
-  // ----- drift course (街の南): ヘアピン(Uターン)が連続する練習コース + 緩い坂 -----
-  // ジグザグに折り返す蛇行レイアウトで、タイトな 180°ターンが多くドリフト向き。
+  // ----- drift course (街の南): 短い直線とヘアピンが連続する峠コース -----
+  // 左右2ブロックの密な蛇行レイアウト。約80mごとに180°ターンが来る。
   const DRIFT_C = { x: -30, z: 460 };
-  // 街モードの地面高さ。ドリフトコース周辺だけ緩やかな丘、それ以外は 0(平坦)。
-  // グリッドの道路(z<=330付近)には一切影響させない。
-  function courseHeightAt(x, z) {
-    const gz = (z - 350) / 45;                 // z=350 で 0 -> 395 で 1(道路側を保護)
-    if (gz <= 0) return 0;
-    const gateN = Math.min(1, gz);
-    const gateS = Math.max(0, Math.min(1, (610 - z) / 45));   // 南端で滑らかに 0
-    const gateX = Math.max(0, Math.min((x + 300) / 55, (215 - x) / 55, 1));
-    const roll = 3.4 + 3.4 * Math.sin(x * 0.018) + 2.8 * Math.sin(z * 0.028 + 0.7);
-    return Math.max(0, roll) * gateN * gateS * gateX;
-  }
+  const DRIFT_TOP_Z = 372;
+  const driftConnectorCandidates = V_ROADS.map((r) => r.pos)
+    .filter((px) => px >= DRIFT_C.x - 150 && px <= DRIFT_C.x + 120);
+  const DRIFT_CONNECTOR_X = driftConnectorCandidates.length
+    ? driftConnectorCandidates.reduce((a, b) => (Math.abs(b - DRIFT_C.x) < Math.abs(a - DRIFT_C.x) ? b : a))
+    : DRIFT_C.x;
 
   function driftLoop() {
     const pts = [];
-    const x0 = DRIFT_C.x - 150, x1 = DRIFT_C.x + 150, R = 20, rows = 6, gap = 2 * R;
-    const zTop = DRIFT_C.z - ((rows - 1) / 2) * gap;
-    const arc = (ccx, ccz, a0, a1, steps) => {
+    const R = 12, rows = 8, gap = 2 * R;
+    const zTop = DRIFT_TOP_Z, zBottom = zTop + (rows - 1) * gap;
+    const leftOuter = -150, leftInner = -70;
+    const rightInner = 10, rightOuter = 90;
+    const arc = (ccx, ccz, a0, a1, steps = 8) => {
       for (let i = 1; i <= steps; i++) {
         const a = a0 + (a1 - a0) * (i / steps);
         pts.push({ x: ccx + Math.cos(a) * R, z: ccz + Math.sin(a) * R });
       }
     };
+
+    // 左ブロック: 内側上端から連続Uターンで登る。
+    pts.push({ x: leftInner, z: zTop });
     for (let r = 0; r < rows; r++) {
       const z = zTop + r * gap;
-      const l2r = r % 2 === 0;
-      pts.push({ x: l2r ? x0 : x1, z });
-      pts.push({ x: l2r ? x1 : x0, z });
-      if (r < rows - 1) {                 // タイトなヘアピンで次の直線へ折り返す
-        if (l2r) arc(x1, z + R, -Math.PI / 2, Math.PI / 2, 8);        // 東側で U ターン
-        else arc(x0, z + R, -Math.PI / 2, -Math.PI * 3 / 2, 8);       // 西側で U ターン
+      const towardOuter = r % 2 === 0;
+      pts.push({ x: towardOuter ? leftOuter : leftInner, z });
+      if (r < rows - 1) {
+        if (towardOuter) arc(leftOuter, z + R, -Math.PI / 2, -Math.PI * 3 / 2);
+        else arc(leftInner, z + R, -Math.PI / 2, Math.PI / 2);
       }
     }
-    // 最終行(西端)から先頭行へ、西側を大きく回り込んで閉じる(もう1つの U ターン)
-    const zEnd = zTop + (rows - 1) * gap, BR = (zEnd - zTop) / 2;
-    for (let i = 1; i <= 18; i++) {
-      const a = Math.PI / 2 + (Math.PI) * (i / 18);   // +90° -> +270°(西側へ膨らむ)
-      pts.push({ x: x0 + Math.cos(a) * BR, z: (zTop + zEnd) / 2 + Math.sin(a) * BR });
+
+    // 頂上の短い連絡区間で右ブロックへ渡る。
+    pts.push({ x: rightInner, z: zBottom });
+
+    // 右ブロック: 頂上から連続Uターンで下る。
+    for (let r = 0; r < rows; r++) {
+      const z = zBottom - r * gap;
+      const towardOuter = r % 2 === 0;
+      pts.push({ x: towardOuter ? rightOuter : rightInner, z });
+      if (r < rows - 1) {
+        if (towardOuter) arc(rightOuter, z - R, Math.PI / 2, -Math.PI / 2);
+        else arc(rightInner, z - R, Math.PI / 2, Math.PI * 3 / 2);
+      }
     }
     return pts;
   }
   const driftLoopPts = driftLoop();
 
-  // 起伏に沿ってコースを舗装(長い直線は分割して丘に追従させる)。
+  // 前半は標高24mまで登り、後半は同じ距離を下る峠型プロフィール。
+  const DRIFT_PEAK_HEIGHT = 24;
+  const driftProfile = (() => {
+    const cumulative = [0];
+    let total = 0;
+    for (let i = 0; i < driftLoopPts.length; i++) {
+      const p = driftLoopPts[i], q = driftLoopPts[(i + 1) % driftLoopPts.length];
+      total += Math.hypot(q.x - p.x, q.z - p.z);
+      cumulative.push(total);
+    }
+    return { cumulative, total };
+  })();
+
+  // 道路に近い区間の標高を合成して、道路と周囲の地表を同じ峠形状にする。
+  // sample を渡した場合は、地表の路盤処理用に道路までの距離も返す。
+  function courseHeightAt(x, z, sample) {
+    if (sample) sample.roadDistance = Infinity;
+    if (z <= 350 || z >= 620 || x <= -280 || x >= 215) return 0;
+    let closestD2 = Infinity, weightedHeight = 0, weightSum = 0;
+    for (let i = 0; i < driftLoopPts.length; i++) {
+      const p = driftLoopPts[i], q = driftLoopPts[(i + 1) % driftLoopPts.length];
+      const dx = q.x - p.x, dz = q.z - p.z;
+      const len2 = dx * dx + dz * dz;
+      const t = len2 > 0 ? clamp(((x - p.x) * dx + (z - p.z) * dz) / len2, 0, 1) : 0;
+      const px = p.x + dx * t, pz = p.z + dz * t;
+      const d2 = (x - px) ** 2 + (z - pz) ** 2;
+      const progress = (driftProfile.cumulative[i] + Math.sqrt(len2) * t) / driftProfile.total;
+      const height = DRIFT_PEAK_HEIGHT * Math.sin(Math.PI * progress);
+      const weight = 1 / Math.pow(d2 + 9, 2);
+      weightedHeight += height * weight;
+      weightSum += weight;
+      if (d2 < closestD2) closestD2 = d2;
+    }
+    if (sample) {
+      const connectorZ = clamp(z, 330, DRIFT_TOP_Z);
+      const connectorD2 = (x - DRIFT_CONNECTOR_X) ** 2 + (z - connectorZ) ** 2;
+      sample.roadDistance = Math.sqrt(Math.min(closestD2, connectorD2));
+    }
+    const distance = Math.sqrt(closestD2);
+    const edgeT = clamp((distance - 10) / 100, 0, 1);
+    const terrainFade = 1 - edgeT * edgeT * (3 - 2 * edgeT);
+    const northT = clamp((z - 350) / (DRIFT_TOP_Z - 350), 0, 1);
+    const northGate = northT * northT * (3 - 2 * northT);
+    const southT = clamp((620 - z) / 80, 0, 1);
+    const southGate = southT * southT * (3 - 2 * southT);
+    const xGate = clamp(Math.min((x + 280) / 55, (215 - x) / 55), 0, 1);
+    return (weightedHeight / weightSum) * terrainFade * northGate * southGate * xGate;
+  }
+
+  // 峠の起伏に沿ってコースを舗装する。
   function paveCourse(pts) {
     for (let i = 0; i < pts.length; i++) {
       const p = pts[i], q = pts[(i + 1) % pts.length];
       const dx = q.x - p.x, dz = q.z - p.z, len = Math.hypot(dx, dz);
       if (len < 0.01) continue;
       const yaw = Math.atan2(dx, dz), c = Math.cos(yaw), s = Math.sin(yaw);
-      const steps = Math.max(1, Math.round(len / 8));
+      // 長い平面を避け、曲面状の地表へ追従するよう最大4mに細分化する。
+      const steps = Math.max(1, Math.ceil(len / 4));
       for (let k = 0; k < steps; k++) {
         const t0 = k / steps, t1 = (k + 1) / steps;
         const ax = p.x + dx * t0, az = p.z + dz * t0;
         const bx = p.x + dx * t1, bz = p.z + dz * t1;
         const mx = (ax + bx) / 2, mz = (az + bz) / 2, sl = len / steps;
-        asphalt.addSloped(mx, mz, 9, sl + 0.6, yaw, courseHeightAt, 0.04);
-        paint.addSloped(mx + 4.3 * c, mz - 4.3 * s, 0.16, sl + 0.4, yaw, courseHeightAt, 0.07);
-        paint.addSloped(mx - 4.3 * c, mz + 4.3 * s, 0.16, sl + 0.4, yaw, courseHeightAt, 0.07);
-        if (k % 2 === 0) paint.addSloped(mx, mz, 0.16, sl * 0.6, yaw, courseHeightAt, 0.07);  // 中央破線
+        driftShoulder.addSloped(mx, mz, 11, sl + 0.8, yaw, courseHeightAt, 0.0);
+        asphalt.addSloped(mx, mz, 9, sl + 0.6, yaw, courseHeightAt, 0.06);
+        paint.addSloped(mx + 4.3 * c, mz - 4.3 * s, 0.16, sl + 0.4, yaw, courseHeightAt, 0.09);
+        paint.addSloped(mx - 4.3 * c, mz + 4.3 * s, 0.16, sl + 0.4, yaw, courseHeightAt, 0.09);
+        if (k % 2 === 0) paint.addSloped(mx, mz, 0.16, sl * 0.6, yaw, courseHeightAt, 0.09);  // 中央破線
       }
     }
   }
 
   if (!MAP_GLTF) {
+    BOUND_X_MIN = -350;              // 西側の外周道路まで走行可能にする
     BOUND_Z = 620;                   // 南のドリフトコースまで走れるように拡張
     paveCourse(driftLoopPts);
     // グリッド道路とドリフトコースをつなぐ短い連絡路
     {
-      const cand = V_ROADS.map((r) => r.pos).filter((px) => px >= DRIFT_C.x - 150 && px <= DRIFT_C.x + 120);
-      const rx = cand.length ? cand.reduce((a, b) => (Math.abs(b - DRIFT_C.x) < Math.abs(a - DRIFT_C.x) ? b : a)) : DRIFT_C.x;
-      const z0 = 330, z1 = 362, steps = 6;
+      const z0 = 330, z1 = DRIFT_TOP_Z, steps = 7;
       for (let k = 0; k < steps; k++) {
         const mz = z0 + (z1 - z0) * (k + 0.5) / steps;
-        asphalt.addSloped(rx, mz, 9, (z1 - z0) / steps + 0.4, 0, courseHeightAt, 0.04);
+        driftShoulder.addSloped(DRIFT_CONNECTOR_X, mz, 11, (z1 - z0) / steps + 0.8, 0, courseHeightAt, 0.0);
+        asphalt.addSloped(DRIFT_CONNECTOR_X, mz, 9, (z1 - z0) / steps + 0.4, 0, courseHeightAt, 0.06);
       }
-      patches.addSloped(rx, z1, 12, 12, 0, courseHeightAt, 0.05);
+      patches.addSloped(DRIFT_CONNECTOR_X, z1, 12, 12, 0, courseHeightAt, 0.07);
     }
+    scene.add(driftShoulder.build(true));
     scene.add(asphalt.build(true));
     scene.add(paint.build(false));
     scene.add(patches.build(true));
 
-    // 地面の頂点をコースの丘の高さへ持ち上げる(道路とコースが同じ起伏に乗る)。
+    // 地面を峠へ持ち上げ、道路付近は路盤として少し掘り下げる。
+    // 粗い地表三角形が道路面を横切って突き抜けるのを防ぐ。
     const gpos = ground.geometry.attributes.position;
+    const terrainSample = { roadDistance: Infinity };
     for (let i = 0; i < gpos.count; i++) {
       const wx = gpos.getX(i) + ground.position.x;   // ローカル->ワールド X
       const wz = -gpos.getY(i);                       // ローカル Y -> ワールド Z
-      gpos.setZ(i, courseHeightAt(wx, wz));            // ローカル Z -> ワールド Y
+      const height = courseHeightAt(wx, wz, terrainSample);
+      const cutT = 1 - clamp((terrainSample.roadDistance - 12) / 12, 0, 1);
+      const roadbedCut = 0.55 * cutT * cutT * (3 - 2 * cutT);
+      gpos.setZ(i, height - roadbedCut);               // ローカル Z -> ワールド Y
     }
     gpos.needsUpdate = true;
     ground.geometry.computeVertexNormals();
@@ -528,17 +651,23 @@ import { AUDIO } from './audio.js';
   function onAnyRoad(x, z, margin) {
     for (const r of V_ROADS) if (Math.abs(x - r.pos) < r.w / 2 + margin && Math.abs(z) < ROAD_LEN / 2) return true;
     for (const r of H_ROADS) if (Math.abs(z - r.pos) < r.w / 2 + margin && Math.abs(x) < ROAD_LEN / 2) return true;
-    for (const d of DIAGS) if (distToDiag(x, z, d) < d.w / 2 + margin) return true;
+    if (Math.abs(Math.abs(x) - CITY_EDGE) < PERIMETER_ROAD.w / 2 + margin && Math.abs(z) <= CITY_EDGE + margin) return true;
+    if (Math.abs(Math.abs(z) - CITY_EDGE) < PERIMETER_ROAD.w / 2 + margin && Math.abs(x) <= CITY_EDGE + margin) return true;
+    for (const d of DIAGS) {
+      const t = (x - d.cx) * Math.sin(d.yaw) + (z - d.cz) * Math.cos(d.yaw);
+      if (t >= d.t0 - margin && t <= d.t1 + margin && distToDiag(x, z, d) < d.w / 2 + margin) return true;
+    }
     const rr = (4 + margin + 3) * (4 + margin + 3);   // route samples are ~5 m apart
     for (const p of forestLoop) if ((p.x - x) * (p.x - x) + (p.z - z) * (p.z - z) < rr) return true;
     for (const p of connector) if ((p.x - x) * (p.x - x) + (p.z - z) * (p.z - z) < rr) return true;
     return false;
   }
 
-  // ----- blocks: 2 or 4 buildings each, fronts facing the road -----
+  // ----- dense blocks: roughly 9–25 buildings each, fronts facing roads -----
   const BUILDING_COLORS = [0xb8b0a4, 0x9aa4ad, 0xc4b49a, 0xa8b89e, 0xbfa3a0, 0x93a0b5];
   function placeBuildings(voxMeshes) {
-    const boxGeoCache = [];
+    // Placeholder boxes are instanced by color so hundreds of buildings stay cheap.
+    const boxLists = BUILDING_COLORS.map(() => []);
     for (let i = 0; i + 1 < V_ROADS.length; i++) {
       for (let j = 0; j + 1 < H_ROADS.length; j++) {
         const x1 = V_ROADS[i].pos + V_ROADS[i].w / 2 + 2;
@@ -548,56 +677,76 @@ import { AUDIO } from './audio.js';
         const bw = x2 - x1, bd = z2 - z1;
         if (bw < 24 || bd < 24) continue;
 
-        const count = cityRnd() < 0.5 ? 2 : 4;
-        let sides = [0, 1, 2, 3];                    // +Z, -Z, +X, -X edge of block
-        if (count === 2) {
-          const first = Math.floor(cityRnd() * 4);
-          sides = [first, first ^ 1];                // opposite pair
-        }
-        for (const side of sides) {
-          const w = 8 + cityRnd() * 6;               // frontage
-          const d2 = 8 + cityRnd() * 5;              // depth
-          const h = 6 + cityRnd() * 12;
-          const cx0 = (x1 + x2) / 2, cz0 = (z1 + z2) / 2;
-          const jw = (side < 2 ? bw : bd) / 2 - w / 2 - 2;
-          const jit = (cityRnd() * 2 - 1) * Math.max(0, jw);
-          let x, z, yaw;
-          if (side === 0) { x = cx0 + jit; z = z2 - d2 / 2 - 1.5; yaw = 0; }
-          else if (side === 1) { x = cx0 + jit; z = z1 + d2 / 2 + 1.5; yaw = Math.PI; }
-          else if (side === 2) { x = x2 - d2 / 2 - 1.5; z = cz0 + jit; yaw = Math.PI / 2; }
-          else { x = x1 + d2 / 2 + 1.5; z = cz0 + jit; yaw = -Math.PI / 2; }
+        const cols = clamp(Math.floor(bw / 22), 3, 5);
+        const rows = clamp(Math.floor(bd / 22), 3, 5);
+        const cellW = bw / cols, cellD = bd / rows;
+        for (let row = 0; row < rows; row++) {
+          for (let col = 0; col < cols; col++) {
+            if (cityRnd() < 0.08) continue;           // occasional courtyard / parking lot
+            const w = cellW * (0.56 + cityRnd() * 0.18);
+            const d2 = cellD * (0.56 + cityRnd() * 0.18);
+            const h = 7 + cityRnd() * 25;
+            const jx = (cityRnd() * 2 - 1) * Math.max(0, (cellW - w) * 0.16);
+            const jz = (cityRnd() * 2 - 1) * Math.max(0, (cellD - d2) * 0.16);
+            const x = x1 + cellW * (col + 0.5) + jx;
+            const z = z1 + cellD * (row + 0.5) + jz;
 
-          let bad = false;
-          for (const dg of DIAGS) if (distToDiag(x, z, dg) < dg.w / 2 + (w + d2) / 2) bad = true;
-          for (const o of obstacles) {
-            const rr = o.r + (w + d2) / 4;
-            if ((o.x - x) * (o.x - x) + (o.z - z) * (o.z - z) < rr * rr) bad = true;
-          }
-          if (bad) continue;
+            // Point each front (+Z) toward the nearest surrounding road.
+            const edgeDistances = [z2 - z, z - z1, x2 - x, x - x1];
+            let side = 0;
+            for (let k = 1; k < 4; k++) if (edgeDistances[k] < edgeDistances[side]) side = k;
+            const yaw = [0, Math.PI, Math.PI / 2, -Math.PI / 2][side];
 
-          let mesh;
-          // vox の建物があっても箱と混ぜて配置する
-          if (voxMeshes && voxMeshes.length && cityRnd() < 0.6) {
-            mesh = voxMeshes[Math.floor(cityRnd() * voxMeshes.length)].clone();
-          } else {
-            const geo = new THREE.BoxGeometry(w, h, d2);
-            boxGeoCache.push(geo);
-            mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({
-              color: BUILDING_COLORS[Math.floor(cityRnd() * BUILDING_COLORS.length)],
-            }));
-            mesh.position.y = h / 2;
-            mesh.castShadow = true;
-            mesh.receiveShadow = true;
+            let bad = false;
+            for (const dg of DIAGS) {
+              if (distToDiag(x, z, dg) < dg.w / 2 + Math.hypot(w, d2) / 2) bad = true;
+            }
+            if (bad) continue;
+
+            // vox の建物があっても箱と混ぜて配置する
+            if (voxMeshes && voxMeshes.length && cityRnd() < 0.6) {
+              const mesh = voxMeshes[Math.floor(cityRnd() * voxMeshes.length)].clone();
+              const holder = new THREE.Group();
+              holder.add(mesh);
+              holder.position.set(x, 0, z);
+              holder.rotation.y = yaw;
+              scene.add(holder);
+            } else {
+              const colorIndex = Math.floor(cityRnd() * BUILDING_COLORS.length);
+              boxLists[colorIndex].push({ x, z, w, h, d: d2, yaw });
+            }
+            obstacles.push({ x, z, r: (w + d2) / 4 });
           }
-          const holder = new THREE.Group();
-          holder.add(mesh);
-          holder.position.set(x, 0, z);
-          holder.rotation.y = yaw;                   // front (+Z) faces the road
-          scene.add(holder);
-          obstacles.push({ x, z, r: (w + d2) / 4 });
         }
       }
     }
+
+    const unitBox = new THREE.BoxGeometry(1, 1, 1);
+    const matrix = new THREE.Matrix4();
+    const rotation = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0);
+    boxLists.forEach((list, colorIndex) => {
+      if (!list.length) return;
+      const inst = new THREE.InstancedMesh(
+        unitBox,
+        new THREE.MeshLambertMaterial({ color: BUILDING_COLORS[colorIndex] }),
+        list.length
+      );
+      list.forEach((b, index) => {
+        rotation.setFromAxisAngle(up, b.yaw);
+        matrix.compose(
+          new THREE.Vector3(b.x, b.h / 2, b.z),
+          rotation,
+          new THREE.Vector3(b.w, b.h, b.d)
+        );
+        inst.setMatrixAt(index, matrix);
+      });
+      inst.instanceMatrix.needsUpdate = true;
+      inst.computeBoundingSphere();
+      inst.castShadow = true;
+      inst.receiveShadow = true;
+      scene.add(inst);
+    });
   }
 
   // --------------------------------------------------------------- HUD ----
@@ -861,7 +1010,9 @@ import { AUDIO } from './audio.js';
   // 当たり判定の半径は接地影の横幅の半分に合わせる(実車幅とほぼ一致)。
   const carRadiusFor = (bike) => (bike ? BIKE_SHADOW.w : CAR_SHADOW.w) / 2;
 
-  // vox フォルダの CPU 用車種(tree01/tree02 と プレイヤーの volvo 以外すべて)。
+  const PLAYER_CAR_VOX = 'vox/toyota86.vox';
+
+  // vox フォルダの CPU 用車種(tree01/tree02 と プレイヤーの toyota86 以外すべて)。
   // 街(?map=city)では全種類を道路に走らせる。
   const CPU_CAR_VOX = [
     'kabu', 'kabu2', 'kabu3', 'kabu4',
@@ -869,7 +1020,7 @@ import { AUDIO } from './audio.js';
     'nissan180sx0', 'nissan180sx1', 'nissan180sx2', 'nissan180sx3',
     'toyotahigh', 'toyotahigh00', 'toyotahigh01', 'toyotahigh02',
     'toyotahigh03', 'toyotahigh04', 'toyotahigh05',
-    'toyotaprobox', 'volvo_sedan',
+    'toyotaprobox', 'volvo', 'volvo_sedan',
     'vw01', 'vw02', 'vw03', 'vw04', 'vw05', 'vw06',
   ].map((n) => 'vox/' + n + '.vox');
 
@@ -900,17 +1051,17 @@ import { AUDIO } from './audio.js';
       const z = (rnd() * 2 - 1) * 310;
       if (tryPlace(cityLists, x, z, 3, 4)) placed++;
     }
-    // dense woods hugging the forest course
+    // Very dense woods hugging the entire curving forest course.
     placed = 0; attempts = 0;
-    while (placed < 220 && attempts++ < 20000) {
+    while (placed < 900 && attempts++ < 90000) {
       const p = forestLoop[Math.floor(rnd() * forestLoop.length)];
       const ang = rnd() * Math.PI * 2;
-      const d = 7 + rnd() * 55;
+      const d = 8 + rnd() * 70;
       const x = p.x + Math.cos(ang) * d;
       const z = p.z + Math.sin(ang) * d;
-      if (x < 330 || x > BOUND_X_MAX || Math.abs(z) > BOUND_Z) continue;
+      if (x < 300 || x > BOUND_X_MAX || Math.abs(z) > BOUND_Z) continue;
       const sector = Math.floor(((Math.atan2(z - FOREST_C.z, x - FOREST_C.x) + Math.PI) / (Math.PI * 2)) * SECTORS) % SECTORS;
-      if (tryPlace(sectorLists[sector], x, z, 2.5, 2.5)) placed++;
+      if (tryPlace(sectorLists[sector], x, z, 2.5, 2.0)) placed++;
     }
 
     const m4 = new THREE.Matrix4();
@@ -1046,15 +1197,15 @@ import { AUDIO } from './audio.js';
   }
 
   async function init() {
-    const [volvo, nissan, vw, tree1, tree2] = await Promise.all([
-      VOX.load('vox/volvo.vox', { scale: VOXEL_SCALE }),
+    const [toyota86, nissan, vw, tree1, tree2] = await Promise.all([
+      VOX.load(PLAYER_CAR_VOX, { scale: VOXEL_SCALE }),
       VOX.load('vox/nissan180sx2.vox', { scale: VOXEL_SCALE }),
       VOX.load('vox/vw01.vox', { scale: VOXEL_SCALE }),
       VOX.load('vox/tree01.vox', { scale: TREE_SCALE }),
       VOX.load('vox/tree02.vox', { scale: TREE_SCALE }),
     ]);
 
-    const p = makeCarGroup(volvo);
+    const p = makeCarGroup(toyota86);
     player.group = p.group;
     player.tilt = p.tilt;
 
@@ -1157,13 +1308,14 @@ import { AUDIO } from './audio.js';
       CPU_CAR_VOX.map((u) => VOX.load(u, { scale: VOXEL_SCALE }))
     );
 
-    // グリッド上に複数の周回コースを用意し、全車種を左車線に散らして走らせる。
+    // グリッドと外周環状道路に複数の周回コースを用意する。
     const vLast = V_ROADS.length - 1, hLast = H_ROADS.length - 1;
     const loopDefs = [
       rectLoop(V_ROADS[0].pos, V_ROADS[vLast].pos, H_ROADS[0].pos, H_ROADS[hLast].pos, false),
       rectLoop(V_ROADS[1].pos, V_ROADS[Math.min(2, vLast)].pos, H_ROADS[1].pos, H_ROADS[Math.min(2, hLast)].pos, true),
       rectLoop(V_ROADS[Math.min(2, vLast)].pos, V_ROADS[vLast].pos, H_ROADS[0].pos, H_ROADS[Math.min(2, hLast)].pos, true),
       rectLoop(V_ROADS[0].pos, V_ROADS[Math.min(2, vLast)].pos, H_ROADS[Math.min(1, hLast)].pos, H_ROADS[hLast].pos, false),
+      rectLoop(-CITY_EDGE, CITY_EDGE, -CITY_EDGE, CITY_EDGE, true),
       routeWps(forestLoop, 5),
     ];
 
