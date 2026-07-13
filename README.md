@@ -1,4 +1,4 @@
-# VOX DRIVE
+# イニシャルT
 
 three.js の平面ワールドを、MagicaVoxel (.vox) 形式の車で走り回るゲームです。
 
