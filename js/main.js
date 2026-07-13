@@ -2,7 +2,7 @@
  * VOX DRIVE — drive a voxel Volvo around a plane scattered with voxel trees,
  * while two AI cars (180SX / VW) cruise on loops.
  *
- *   A: accel  S: brake  Space: handbrake (drift)
+ *   A: brake  S: accel  Space: handbrake (drift)
  *   Up/Down: shift  Left/Right: steer  Mouse drag: camera
  */
 import * as THREE from 'three';
@@ -37,11 +37,17 @@ import { AUDIO } from './audio.js';
   // the light gap at glancing angles (the contact shadow does the rest).
   const CAR_SINK = 0.02;
 
+  // デモ画面の状態。読み込み後はまずデモ(自動運転のドリフト回遊)になり、
+  // ユーザーが何か操作するとゲーム開始。
+  let demoActive = false;
+  let startGame = function () {};   // init 内で本体を差し込む
+
   // ------------------------------------------------------------- input ----
   const keys = {};
   let shiftUp = false, shiftDown = false;
   window.addEventListener('keydown', (e) => {
     AUDIO.unlock();
+    if (demoActive) { startGame(); return; }   // 何かキーでゲーム開始
     const k = e.key;
     if (k.startsWith('Arrow') || k === ' ') e.preventDefault();
     if (!e.repeat) {
@@ -621,10 +627,16 @@ import { AUDIO } from './audio.js';
 
   const aiCars = []; // { group, tilt, pos, heading, v, base, wps, idx, radius }
 
+  // デモ自動運転のルートと、切り替え式デモカメラの状態
+  let demoRoute = null;
+  let demoIdx = 1;
+  const demoCam = { nextChange: 0, until: 0, yaw: 0, pitch: 0.3, dist: 12 };
+
   // ------------------------------------------------------------- camera ---
   const cam = { yaw: 0, pitch: 0.34, dist: 10, dragging: false, lastDrag: 0 };
   renderer.domElement.addEventListener('pointerdown', (e) => {
     AUDIO.unlock();
+    if (demoActive) { startGame(); return; }   // クリックでもゲーム開始
     cam.dragging = true;
     renderer.domElement.setPointerCapture(e.pointerId);
   });
@@ -726,10 +738,12 @@ import { AUDIO } from './audio.js';
     return blob;
   }
 
-  function makeCarGroup(mesh) {
+  function makeCarGroup(mesh, castShadow) {
     const tilt = new THREE.Group();
     mesh.rotation.y = MODEL_YAW;
     mesh.position.y = -CAR_SINK;
+    // 多数の CPU 車はシャドウマップ描画を省いて軽量化(接地影は残る)
+    if (castShadow === false) mesh.castShadow = false;
     tilt.add(mesh);
     const group = new THREE.Group();
     group.add(tilt);
@@ -737,6 +751,18 @@ import { AUDIO } from './audio.js';
     scene.add(group);
     return { group, tilt };
   }
+
+  // vox フォルダの CPU 用車種(tree01/tree02 と プレイヤーの volvo 以外すべて)。
+  // 街(?map=city)では全種類を道路に走らせる。
+  const CPU_CAR_VOX = [
+    'kabu', 'kabu2', 'kabu3', 'kabu4',
+    'nissan0', 'nissan1', 'nissan2', 'nissan3', 'nissan4',
+    'nissan180sx0', 'nissan180sx1', 'nissan180sx2', 'nissan180sx3',
+    'toyotahigh', 'toyotahigh00', 'toyotahigh01', 'toyotahigh02',
+    'toyotahigh03', 'toyotahigh04', 'toyotahigh05',
+    'toyotaprobox', 'volvo_sedan',
+    'vw01', 'vw02', 'vw03', 'vw04', 'vw05', 'vw06',
+  ].map((n) => 'vox/' + n + '.vox');
 
   function scatterTrees(meshes, rnd) {
     // Instancing keeps draw calls low, but one huge InstancedMesh defeats
@@ -981,8 +1007,18 @@ import { AUDIO } from './audio.js';
         });
       });
       initFx();
+
+      // デモ用のドーナツ状ルート(スポーン地点=道路の上を中心に周回ドリフト)
+      const demoDonut = [];
+      const cx = player.pos.x, cz = player.pos.z, R = 24;
+      for (let i = 0; i < 16; i++) {
+        const a = (i / 16) * Math.PI * 2;
+        demoDonut.push({ x: cx + Math.cos(a) * R, z: cz + Math.sin(a) * R });
+      }
+      enterDemo(demoDonut);
+
       document.getElementById('loading').remove();
-      window.__voxDrive = { player, aiCars };   // debug / test hook
+      window.__voxDrive = { player, aiCars, start: () => startGame(), inDemo: () => demoActive };
       requestAnimationFrame(tick);
       return;
     }
@@ -1004,23 +1040,49 @@ import { AUDIO } from './audio.js';
       return wps;
     }
 
+    // CPU 車を全種類ロード(街のみ)。処理が重くならないよう、車種ごとに
+    // ジオメトリを1つだけ持ち、シャドウマップ描画は省く(接地影は残る)。
+    const cpuMeshes = await Promise.all(
+      CPU_CAR_VOX.map((u) => VOX.load(u, { scale: VOXEL_SCALE }))
+    );
+
+    // グリッド上に複数の周回コースを用意し、全車種を左車線に散らして走らせる。
     const vLast = V_ROADS.length - 1, hLast = H_ROADS.length - 1;
-    const loops = [
-      { wps: rectLoop(V_ROADS[1].pos, V_ROADS[Math.min(2, vLast)].pos, H_ROADS[1].pos, H_ROADS[Math.min(2, hLast)].pos, true), base: 8 },
-      { wps: rectLoop(V_ROADS[0].pos, V_ROADS[vLast].pos, H_ROADS[0].pos, H_ROADS[hLast].pos, false), base: 11 },
-      { wps: routeWps(forestLoop, 5), base: 12 },
-      { wps: rectLoop(V_ROADS[Math.min(2, vLast)].pos, V_ROADS[vLast].pos, H_ROADS[0].pos, H_ROADS[Math.min(2, hLast)].pos, true), base: 9 },
+    const loopDefs = [
+      rectLoop(V_ROADS[0].pos, V_ROADS[vLast].pos, H_ROADS[0].pos, H_ROADS[hLast].pos, false),
+      rectLoop(V_ROADS[1].pos, V_ROADS[Math.min(2, vLast)].pos, H_ROADS[1].pos, H_ROADS[Math.min(2, hLast)].pos, true),
+      rectLoop(V_ROADS[Math.min(2, vLast)].pos, V_ROADS[vLast].pos, H_ROADS[0].pos, H_ROADS[Math.min(2, hLast)].pos, true),
+      rectLoop(V_ROADS[0].pos, V_ROADS[Math.min(2, vLast)].pos, H_ROADS[Math.min(1, hLast)].pos, H_ROADS[hLast].pos, false),
+      routeWps(forestLoop, 5),
     ];
-    const aiMeshes = [nissan, vw, nissan.clone(), vw.clone()];
-    loops.forEach((loop, i) => {
-      const g = makeCarGroup(aiMeshes[i]);
-      const start = loop.wps[0];
+
+    // ルートの周長に沿って startFrac の位置へ配置(車どうしが重ならないよう分散)
+    function placeOnLoop(wps, mesh, startFrac, base) {
+      const seg = [];
+      let total = 0;
+      for (let i = 0; i < wps.length; i++) {
+        const a = wps[i], b = wps[(i + 1) % wps.length];
+        const d = Math.hypot(b.x - a.x, b.z - a.z);
+        seg.push(d); total += d;
+      }
+      let dist = startFrac * total, s = 0;
+      while (dist > seg[s]) { dist -= seg[s]; s = (s + 1) % wps.length; }
+      const a = wps[s], b = wps[(s + 1) % wps.length];
+      const t = seg[s] ? dist / seg[s] : 0;
+      const px = a.x + (b.x - a.x) * t, pz = a.z + (b.z - a.z) * t;
+      const g = makeCarGroup(mesh, false);
       aiCars.push({
         group: g.group, tilt: g.tilt,
-        pos: new THREE.Vector3(start.x, 0, start.z),
-        heading: 0, v: 0, base: loop.base,
-        wps: loop.wps, idx: 1, radius: 1.5,
+        pos: new THREE.Vector3(px, 0, pz),
+        heading: Math.atan2(b.x - a.x, b.z - a.z), v: 0, base,
+        wps, idx: (s + 1) % wps.length, radius: 1.5,
       });
+    }
+
+    cpuMeshes.forEach((mesh, i) => {
+      const loop = loopDefs[i % loopDefs.length];
+      const frac = (i * 0.37) % 1;         // ルート上に散らす
+      placeOnLoop(loop, mesh, frac, 7 + (i % 5));   // 25〜40 km/h でばらつき
     });
 
     const buildingMeshes = BUILDING_VOX.length
@@ -1030,25 +1092,75 @@ import { AUDIO } from './audio.js';
     scatterTrees([tree1, tree2], mulberry32(20260711));
     initFx();
 
+    enterDemo(loopDefs[1]);   // 1ブロック周回でドリフトデモ
     document.getElementById('loading').remove();
-    window.__voxDrive = { player, aiCars };   // debug / test hook
+    window.__voxDrive = { player, aiCars, start: () => startGame(), inDemo: () => demoActive };
     requestAnimationFrame(tick);
+  }
+
+  // ------------------------------------------------------------- demo -----
+  // デモ開始: 自動運転ルートをセットしてデモ画面に入る。
+  function enterDemo(route) {
+    demoRoute = route && route.length >= 2 ? route : null;
+    demoIdx = 1;
+    demoActive = !!demoRoute;
+    if (demoActive) {
+      document.body.classList.add('demo');
+      demoCam.nextChange = performance.now() + 6000;
+      demoCam.until = 0;
+    }
+  }
+
+  // ユーザー操作でデモを抜けてゲーム開始(startGame は先頭で let 宣言済み)。
+  startGame = function () {
+    if (!demoActive) return;
+    demoActive = false;
+    document.body.classList.remove('demo');
+    player.vel.set(0, 0, 0);
+    player.drifting = false;
+    player.gear = 2;
+    player.steer = 0;
+    cam.yaw = 0; cam.pitch = 0.34; cam.dist = 10; cam.lastDrag = 0;
+  };
+
+  // ルートを追い、コーナーでは積極的にサイドブレーキでドリフトする自動運転。
+  function demoAutopilot() {
+    const wp = demoRoute[demoIdx];
+    const dx = wp.x - player.pos.x, dz = wp.z - player.pos.z;
+    if (dx * dx + dz * dz < 9 * 9) demoIdx = (demoIdx + 1) % demoRoute.length;
+    let diff = Math.atan2(dx, dz) - player.heading;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    const speed = player.vel.length();
+    return {
+      throttle: true,
+      brake: false,
+      handbrake: Math.abs(diff) > 0.35 && speed > 7,   // コーナーでドリフト
+      steer: clamp(diff * 1.6, -1, 1),
+    };
   }
 
   // ------------------------------------------------------------- update ---
   function updatePlayer(dt) {
+    if (demoActive) player.gear = 4;   // デモは3速で回遊
     // gears
     if (shiftUp) { player.gear = Math.min(player.gear + 1, GEARS.length - 1); shiftUp = false; }
     if (shiftDown) { player.gear = Math.max(player.gear - 1, 0); shiftDown = false; }
     const gear = GEARS[player.gear];
 
-    const throttle = !!keys['a'];
-    const brake = !!keys['s'];
-    const handbrake = !!keys[' '];
+    let throttle, brake, handbrake, input;
+    if (demoActive) {
+      const c = demoAutopilot();
+      throttle = c.throttle; brake = c.brake; handbrake = c.handbrake; input = c.steer;
+    } else {
+      throttle = !!keys['s'];   // S = アクセル
+      brake = !!keys['a'];      // A = ブレーキ
+      handbrake = !!keys[' '];
+      input = (keys['arrowleft'] ? 1 : 0) - (keys['arrowright'] ? 1 : 0);
+    }
 
     // steering (less lock at speed, extra lock while sliding for counter-steer)
     const speedAlong = player.vel.x * Math.sin(player.heading) + player.vel.z * Math.cos(player.heading);
-    const input = (keys['arrowleft'] ? 1 : 0) - (keys['arrowright'] ? 1 : 0);
     const lock = 0.55 / (1 + Math.abs(speedAlong) * (player.drifting ? 0.02 : 0.055));
     player.steer += (input * lock - player.steer) * Math.min(1, dt * 7);
     if (Math.abs(speedAlong) > 0.05) {
@@ -1160,7 +1272,7 @@ import { AUDIO } from './audio.js';
     driftEl.classList.toggle('on', player.drifting);
     let rpm = 0.12;
     if (player.gear !== 1) rpm = clamp(Math.abs(vF / gear.vmax), 0, 1);
-    if (keys['a'] && player.gear !== 1) rpm = Math.max(rpm, 0.3);
+    if (throttle && player.gear !== 1) rpm = Math.max(rpm, 0.3);
     rpmEl.style.width = (rpm * 100).toFixed(1) + '%';
     rpmEl.classList.toggle('red', rpm > 0.93);
   }
@@ -1200,8 +1312,28 @@ import { AUDIO } from './audio.js';
   }
 
   function updateCamera(dt) {
-    // ease back behind the car when the mouse is idle
-    if (!cam.dragging && performance.now() - cam.lastDrag > 1800) {
+    if (demoActive) {
+      // 20秒に1度、5秒ほどランダムな視点に切り替える
+      const t = performance.now();
+      if (t > demoCam.nextChange) {
+        demoCam.until = t + 5000;
+        demoCam.nextChange = t + 20000;
+        demoCam.yaw = (Math.random() * 2 - 1) * Math.PI;
+        demoCam.pitch = 0.14 + Math.random() * 0.85;
+        demoCam.dist = 8 + Math.random() * 15;
+      }
+      const g = Math.min(1, dt * 2.5);
+      if (t < demoCam.until) {
+        cam.yaw += (demoCam.yaw - cam.yaw) * g;
+        cam.pitch += (demoCam.pitch - cam.pitch) * g;
+        cam.dist += (demoCam.dist - cam.dist) * g;
+      } else {                       // 通常時は後方追従
+        cam.yaw += (0 - cam.yaw) * Math.min(1, dt * 1.5);
+        cam.pitch += (0.34 - cam.pitch) * Math.min(1, dt * 1.5);
+        cam.dist += (11 - cam.dist) * Math.min(1, dt * 1.5);
+      }
+    } else if (!cam.dragging && performance.now() - cam.lastDrag > 1800) {
+      // ease back behind the car when the mouse is idle
       cam.yaw += (0 - cam.yaw) * Math.min(1, dt * 1.2);
     }
     const target = new THREE.Vector3(player.pos.x, player.pos.y + 1.4, player.pos.z);
