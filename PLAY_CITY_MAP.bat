@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title VOX DRIVE - City Map
+title INITIAL T - City Map
 
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0local-server.ps1" -StartPath "/?map=city"
 
