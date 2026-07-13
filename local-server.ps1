@@ -72,7 +72,7 @@ try {
         $StartPath = '/' + $StartPath
     }
     $url = "http://127.0.0.1:$Port$StartPath"
-    Write-Host 'VOX DRIVE is running.' -ForegroundColor Green
+    Write-Host 'INITIAL T is running.' -ForegroundColor Green
     Write-Host "Game: $url"
     Write-Host 'Keep this window open while playing.'
     Write-Host 'Press Ctrl+C or close this window to stop the server.'
