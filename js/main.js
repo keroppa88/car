@@ -1014,15 +1014,10 @@ import { AUDIO } from './audio.js';
   // Query version forces browsers/CDNs to pick up a replaced model immediately.
   const PLAYER_CAR_VOX = 'vox/toyota86.vox?v=20260714-1';
 
-  // vox フォルダ内の .vox を実行時に調べ、プレイヤーと樹木以外を CPU 車にする。
+  // vox/ 直下の .vox はすべて車両。プレイヤー車だけ CPU 車から除外する。
+  // 樹木などのコースオブジェクトは vox/object/ に分離している。
   const RESERVED_VOX_FILES = new Set([
     'toyota86.vox',
-    'tree01.vox',
-    'tree02.vox',
-    'tree03.vox',
-    'streettree_giant.vox',
-    'streettree_conifer.vox',
-    'streettree_open_canopy.vox',
   ]);
 
   function cpuVoxUrls(fileNames) {
@@ -1284,9 +1279,9 @@ import { AUDIO } from './audio.js';
   async function init() {
     const [toyota86, tree1, tree2, tree3] = await Promise.all([
       VOX.load(PLAYER_CAR_VOX, { scale: VOXEL_SCALE }),
-      VOX.load('vox/tree01.vox', { scale: TREE_SCALE }),
-      VOX.load('vox/tree02.vox', { scale: TREE_SCALE }),
-      VOX.load('vox/tree03.vox', { scale: TREE_SCALE }),
+      VOX.load('vox/object/tree01.vox', { scale: TREE_SCALE }),
+      VOX.load('vox/object/tree02.vox', { scale: TREE_SCALE }),
+      VOX.load('vox/object/tree03.vox', { scale: TREE_SCALE }),
     ]);
     const discoveredCpuVox = await discoverCpuCarVox();
     const cpuCars = await loadCpuCars(MAP_GLTF ? discoveredCpuVox.slice(0, 4) : discoveredCpuVox);
