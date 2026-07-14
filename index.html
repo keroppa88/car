@@ -221,8 +221,11 @@
     document.body.classList.add('title');
   } else {
     document.getElementById('map-select').remove();
-    import('./js/main.js?v=20260714-1');
+    // Bump this value whenever main.js changes so GitHub Pages/CDN caches do
+    // not keep an older vehicle list or loader implementation.
+    import('./js/main.js?v=20260714-2');
   }
 </script>
 </body>
 </html>
+
