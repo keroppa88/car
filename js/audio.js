@@ -2,7 +2,8 @@
  * Procedural car audio built on the Web Audio API — no sound files.
  *
  * Engine: two detuned sawtooth oscillators + a sub-octave square through a
- * lowpass filter. Each gear has its own frequency band; the pitch climbs
+ * lowpass filter, plus band-limited combustion noise. Each gear has its own
+ * frequency band; the pitch climbs
  * through the band as the revs rise. The 5th gear intentionally reuses
  * the 4th-gear band so cruising never becomes excessively high-pitched.
  *
@@ -32,9 +33,11 @@ function audioModule() {
   })();
 
   let ctx = null;
-  let master, engGain, filt, osc1, osc2, oscSub, screechGain, bp1, bp2;
+  let master, engGain, filt, osc1, osc2, oscSub;
+  let engNoiseGain, engNoiseFilter, screechGain, bp1, bp2;
   let muted = false;
   let rpmSmooth = 0;
+  let roughPhase = 0;
   let revN = 0;              // free-rev state for neutral
 
   function init() {
@@ -77,6 +80,17 @@ function audioModule() {
     const noise = ctx.createBufferSource();
     noise.buffer = buf;
     noise.loop = true;
+
+    // 4速・5速では燃焼のザラつきとして、この帯域ノイズを強める。
+    engNoiseFilter = ctx.createBiquadFilter();
+    engNoiseFilter.type = 'bandpass';
+    engNoiseFilter.frequency.value = 260;
+    engNoiseFilter.Q.value = 0.7;
+    engNoiseGain = ctx.createGain();
+    engNoiseGain.gain.value = 0;
+    noise.connect(engNoiseFilter);
+    engNoiseFilter.connect(engNoiseGain);
+    engNoiseGain.connect(master);
 
     bp1 = ctx.createBiquadFilter();
     bp1.type = 'bandpass';
@@ -140,13 +154,34 @@ function audioModule() {
     rpmSmooth += (rpm - rpmSmooth) * Math.min(1, dt * 4);
 
     const freq = f[0] + (f[1] - f[0]) * rpmSmooth;
-    osc1.frequency.setTargetAtTime(freq, t, 0.04);
-    osc2.frequency.setTargetAtTime(freq, t, 0.04);
-    oscSub.frequency.setTargetAtTime(freq / 2, t, 0.04);
-    filt.frequency.setTargetAtTime(250 + freq * 3.5, t, 0.05);
+
+    // gear index: R=0, N=1, 1速=2 ... 4速=5, 5速=6。
+    // 高速ギアだけ回転ムラを足し、音程を上げずに振動感を強くする。
+    const roughness = s.gear === 5 ? 0.7 : (s.gear === 6 ? 1.0 : 0);
+    roughPhase = (roughPhase + dt * (35 + rpmSmooth * 45)) % (Math.PI * 2);
+    const wobble = roughness * (
+      Math.sin(roughPhase) * 0.018 +
+      Math.sin(roughPhase * 0.47 + 0.9) * 0.009
+    );
+    const roughFreq = freq * (1 + wobble);
+    const pitchResponse = roughness ? 0.012 : 0.04;
+    osc1.frequency.setTargetAtTime(roughFreq, t, pitchResponse);
+    osc2.frequency.setTargetAtTime(roughFreq * (1 - wobble * 0.35), t, pitchResponse);
+    oscSub.frequency.setTargetAtTime(roughFreq / 2, t, pitchResponse);
+    filt.frequency.setTargetAtTime(250 + roughFreq * 3.5, t, 0.05);
 
     const vol = 0.05 + 0.09 * rpmSmooth + (s.throttle ? 0.05 : 0);
-    engGain.gain.setTargetAtTime(vol, t, 0.08);
+    const pulse = 1 + roughness * (
+      Math.sin(roughPhase) * 0.10 + Math.sin(roughPhase * 0.5) * 0.05
+    );
+    engGain.gain.setTargetAtTime(Math.max(0, vol * pulse), t, roughness ? 0.025 : 0.08);
+
+    // 4速で控えめ、5速でさらに多い燃焼ノイズを混ぜる。
+    const engineNoise = roughness * (
+      0.012 + rpmSmooth * 0.025 + (s.throttle ? 0.015 : 0)
+    );
+    engNoiseGain.gain.setTargetAtTime(engineNoise, t, 0.035);
+    engNoiseFilter.frequency.setTargetAtTime(140 + roughFreq * 1.5, t, 0.05);
 
     // screech: whichever is stronger — drifting or locked-up braking
     const drift = s.drifting ? Math.min(1, Math.max(0, s.slip - 1.5) / 5) : 0;
