@@ -90,11 +90,6 @@ import { AUDIO } from './audio.js';
       img.data[i + 2] += n * 0.7;
     }
     ctx.putImageData(img, 0, 0);
-    // sparse darker grass tufts
-    ctx.fillStyle = 'rgba(60,90,40,0.5)';
-    for (let i = 0; i < 350; i++) {
-      ctx.fillRect(Math.floor(rnd() * size), Math.floor(rnd() * size), 2, 2);
-    }
     const tex = new THREE.CanvasTexture(cv);
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
     tex.repeat.set(150, 88);         // square texels on the 2400x1400 ground
@@ -1121,7 +1116,7 @@ import { AUDIO } from './audio.js';
       if (tryPlace(cityLists, x, z, 4, 7)) placed++;
     }
 
-    // tree03 の草むらは使わず、森林コース沿いは tree01 / tree02 だけを配置。
+    // 森林コース沿いは tree01 / tree02 だけを配置。
     placed = 0; attempts = 0;
     while (placed < 1080 && attempts++ < 120000) {
       const pointIndex = Math.floor(rnd() * forestLoop.length);
