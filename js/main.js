@@ -9,7 +9,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from '../lib/GLTFLoader.js';
 import { mergeGeometries } from '../lib/BufferGeometryUtils.js';
 import { VOX } from './vox.js';
-import { AUDIO } from './audio.js';
+import { AUDIO } from './audio.js?v=20260715-1';
 
 (function () {
   'use strict';
