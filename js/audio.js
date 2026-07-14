@@ -158,7 +158,7 @@ function audioModule() {
     // gear index: R=0, N=1, 1速=2 ... 4速=5, 5速=6。
     // 高速ギアだけ回転ムラを足し、音程を上げずに振動感を強くする。
     const roughness = s.gear === 5 ? 0.7 : (s.gear === 6 ? 1.0 : 0);
-    roughPhase = (roughPhase + dt * (35 + rpmSmooth * 45)) % (Math.PI * 2);
+    roughPhase += dt * (35 + rpmSmooth * 45);
     const wobble = roughness * (
       Math.sin(roughPhase) * 0.018 +
       Math.sin(roughPhase * 0.47 + 0.9) * 0.009
