@@ -1092,63 +1092,65 @@ import { AUDIO } from './audio.js';
     }))).filter(Boolean);
   }
 
-  function scatterVegetation(items, rnd) {
+  function scatterTrees(meshes, rnd) {
     // Instancing keeps draw calls low, but one huge InstancedMesh defeats
     // frustum culling — so the forest is split into sectors around the loop.
     const SECTORS = 12;
-    const cityLists = items.map(() => []);
+    const cityLists = meshes.map(() => []);
     const sectorLists = [];
-    for (let i = 0; i < SECTORS; i++) sectorLists.push(items.map(() => []));
+    for (let i = 0; i < SECTORS; i++) sectorLists.push(meshes.map(() => []));
 
-    const treeIndices = items.map((item, i) => item.grass ? -1 : i).filter((i) => i >= 0);
-    const grassIndices = items.map((item, i) => item.grass ? i : -1).filter((i) => i >= 0);
-    function chooseItem(grassChance) {
-      const pool = grassIndices.length && rnd() < grassChance ? grassIndices : treeIndices;
-      return pool[Math.floor(rnd() * pool.length)];
-    }
-
-    function tryPlace(lists, x, z, roadMargin, spacing, grassChance) {
+    function tryPlace(lists, x, z, roadMargin, spacing) {
       if (onAnyRoad(x, z, roadMargin)) return false;
       for (const o of obstacles) {
         const rr = o.r + spacing;
         if ((o.x - x) * (o.x - x) + (o.z - z) * (o.z - z) < rr * rr) return false;
       }
-      const itemIndex = chooseItem(grassChance);
-      const grass = items[itemIndex].grass;
-      const s = grass ? 0.8 + rnd() * 0.8 : 0.75 + rnd() * 0.6;
-      lists[itemIndex].push({ x, z, s, rot: rnd() * Math.PI * 2 });
-      // tree03 は草むらなので車との当たり判定を付けない。
-      if (!grass) obstacles.push({ x, z, r: 0.9 * s });
+      const meshIndex = Math.floor(rnd() * meshes.length);
+      const s = 0.75 + rnd() * 0.6;
+      lists[meshIndex].push({ x, z, s, rot: rnd() * Math.PI * 2 });
+      obstacles.push({ x, z, r: 0.9 * s });
       return true;
     }
 
-    // 建物のある四角区画は植生を少なくし、建物から十分に離す。
+    // 建物のある四角区画は樹木を少なくし、建物から十分に離す。
     let placed = 0, attempts = 0;
-    while (placed < 24 && attempts++ < 6000) {
+    while (placed < 16 && attempts++ < 6000) {
       const x = -310 + rnd() * 620;
       const z = (rnd() * 2 - 1) * 310;
-      if (tryPlace(cityLists, x, z, 4, 7, 0.35)) placed++;
+      if (tryPlace(cityLists, x, z, 4, 7)) placed++;
     }
 
-    // カーブの多い森林コース沿いは tree01 / tree02 / tree03 を高密度配置。
+    // tree03 の草むらは使わず、森林コース沿いは tree01 / tree02 だけを配置。
     placed = 0; attempts = 0;
-    while (placed < 1800 && attempts++ < 160000) {
-      const p = forestLoop[Math.floor(rnd() * forestLoop.length)];
-      const ang = rnd() * Math.PI * 2;
-      const d = 6 + rnd() * 82;
-      const x = p.x + Math.cos(ang) * d;
-      const z = p.z + Math.sin(ang) * d;
+    while (placed < 1080 && attempts++ < 120000) {
+      const pointIndex = Math.floor(rnd() * forestLoop.length);
+      const p = forestLoop[pointIndex];
+      const prev = forestLoop[(pointIndex + forestLoop.length - 1) % forestLoop.length];
+      const next = forestLoop[(pointIndex + 1) % forestLoop.length];
+      const tangentX = next.x - prev.x;
+      const tangentZ = next.z - prev.z;
+      const tangentLength = Math.hypot(tangentX, tangentZ) || 1;
+      const tx = tangentX / tangentLength;
+      const tz = tangentZ / tangentLength;
+      const nx = -tz;
+      const nz = tx;
+      const side = rnd() < 0.5 ? -1 : 1;
+      // 道路中心から9～27m。二乗分布で道路に近い側へ集中させる。
+      const roadDistance = 9 + rnd() * rnd() * 18;
+      const alongRoad = (rnd() * 2 - 1) * 10;
+      const x = p.x + nx * side * roadDistance + tx * alongRoad;
+      const z = p.z + nz * side * roadDistance + tz * alongRoad;
       if (x < 300 || x > BOUND_X_MAX || Math.abs(z) > BOUND_Z) continue;
       const sector = Math.floor(((Math.atan2(z - FOREST_C.z, x - FOREST_C.x) + Math.PI) / (Math.PI * 2)) * SECTORS) % SECTORS;
-      if (tryPlace(sectorLists[sector], x, z, 2.5, 1.25, 0.4)) placed++;
+      if (tryPlace(sectorLists[sector], x, z, 2.5, 1.25)) placed++;
     }
 
     const m4 = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const up = new THREE.Vector3(0, 1, 0);
-    function buildInstanced(item, list) {
+    function buildInstanced(mesh, list) {
       if (!list.length) return;
-      const mesh = item.mesh;
       const inst = new THREE.InstancedMesh(mesh.geometry, mesh.material, list.length);
       list.forEach((p, i) => {
         q.setFromAxisAngle(up, p.rot);
@@ -1156,13 +1158,13 @@ import { AUDIO } from './audio.js';
         inst.setMatrixAt(i, m4);
       });
       inst.computeBoundingSphere();
-      inst.castShadow = !item.grass;
+      inst.castShadow = true;
       inst.receiveShadow = true;
       scene.add(inst);
     }
-    items.forEach((item, t) => {
-      buildInstanced(item, cityLists[t]);
-      for (const lists of sectorLists) buildInstanced(item, lists[t]);
+    meshes.forEach((mesh, t) => {
+      buildInstanced(mesh, cityLists[t]);
+      for (const lists of sectorLists) buildInstanced(mesh, lists[t]);
     });
   }
 
@@ -1277,11 +1279,10 @@ import { AUDIO } from './audio.js';
   }
 
   async function init() {
-    const [toyota86, tree1, tree2, tree3] = await Promise.all([
+    const [toyota86, tree1, tree2] = await Promise.all([
       VOX.load(PLAYER_CAR_VOX, { scale: VOXEL_SCALE }),
       VOX.load('vox/object/tree01.vox', { scale: TREE_SCALE }),
       VOX.load('vox/object/tree02.vox', { scale: TREE_SCALE }),
-      VOX.load('vox/object/tree03.vox', { scale: TREE_SCALE }),
     ]);
     const discoveredCpuVox = await discoverCpuCarVox();
     const cpuCars = await loadCpuCars(MAP_GLTF ? discoveredCpuVox.slice(0, 4) : discoveredCpuVox);
@@ -1434,11 +1435,7 @@ import { AUDIO } from './audio.js';
       ? await Promise.all(BUILDING_VOX.map((u) => VOX.load(u, { scale: VOXEL_SCALE })))
       : null;
     placeBuildings(buildingMeshes);
-    scatterVegetation([
-      { mesh: tree1, grass: false },
-      { mesh: tree2, grass: false },
-      { mesh: tree3, grass: true },
-    ], mulberry32(20260711));
+    scatterTrees([tree1, tree2], mulberry32(20260711));
     initFx();
 
     // ドリフトコースにも CPU 車を2台流す(グリッドの車を奪わないよう clone)
