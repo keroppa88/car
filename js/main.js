@@ -1118,7 +1118,7 @@ import { AUDIO } from './audio.js';
 
     // 森林コース沿いは tree01 / tree02 だけを配置。
     placed = 0; attempts = 0;
-    while (placed < 1080 && attempts++ < 120000) {
+    while (placed < 756 && attempts++ < 84000) {
       const pointIndex = Math.floor(rnd() * forestLoop.length);
       const p = forestLoop[pointIndex];
       const prev = forestLoop[(pointIndex + forestLoop.length - 1) % forestLoop.length];
