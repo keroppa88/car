@@ -117,7 +117,7 @@ import { AUDIO } from './audio.js';
   scene.add(hemi);
   const sun = new THREE.DirectionalLight(0xfff3d8, 1.15);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.mapSize.set(512, 512);
   sun.shadow.camera.left = -55;
   sun.shadow.camera.right = 55;
   sun.shadow.camera.top = 55;
