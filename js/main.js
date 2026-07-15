@@ -18,7 +18,10 @@ import { AUDIO } from './audio.js?v=20260715-1';
   //   ?map=nihonbashi.gltf … 日本橋マップを読む
   //   ?map=maps/sample.glb … 別の glTF/GLB マップを読む
   //   ?map=city            … デフォルトと同じ自動生成マップ
-  const mapParam = new URLSearchParams(location.search).get('map');
+  const pageQuery = new URLSearchParams(location.search);
+  const mapParam = pageQuery.get('map');
+  const carParam = (pageQuery.get('car') || 'toyota86').toLowerCase();
+  const PLAYER_CAR_KEY = carParam === 'volvo240' ? 'volvo240' : 'toyota86';
   const MAP_GLTF = mapParam === null || ['', 'city', 'procedural', 'none', '0'].includes(mapParam)
     ? ''
     : mapParam;
@@ -1007,13 +1010,15 @@ import { AUDIO } from './audio.js?v=20260715-1';
   // 当たり判定の半径は接地影の横幅の半分に合わせる(実車幅とほぼ一致)。
   const carRadiusFor = (bike) => (bike ? BIKE_SHADOW.w : CAR_SHADOW.w) / 2;
 
-  // Query version forces browsers/CDNs to pick up a replaced model immediately.
-  const PLAYER_CAR_VOX = 'vox/toyota86.vox?v=20260714-1';
+  // タイトル画面の選択に応じてユーザー車を切り替える。
+  // Volvo 240 は追加済みの vox/volvo240.vox を使用する。
+  const PLAYER_CAR_FILE = PLAYER_CAR_KEY === 'volvo240' ? 'volvo240.vox' : 'toyota86.vox';
+  const PLAYER_CAR_VOX = 'vox/' + encodeURIComponent(PLAYER_CAR_FILE) + '?v=20260715-1';
 
-  // vox/ 直下の .vox はすべて車両。プレイヤー車だけ CPU 車から除外する。
+  // vox/ 直下の .vox はすべて車両。選択中のプレイヤー車だけ CPU 車から除外する。
   // 樹木などのコースオブジェクトは vox/object/ に分離している。
   const RESERVED_VOX_FILES = new Set([
-    'toyota86.vox',
+    PLAYER_CAR_FILE.toLowerCase(),
   ]);
 
   function cpuVoxUrls(fileNames) {
@@ -1275,7 +1280,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
   }
 
   async function init() {
-    const [toyota86, tree1, tree2] = await Promise.all([
+    const [playerCarMesh, tree1, tree2] = await Promise.all([
       VOX.load(PLAYER_CAR_VOX, { scale: VOXEL_SCALE }),
       VOX.load('vox/object/tree01.vox', { scale: TREE_SCALE }),
       VOX.load('vox/object/tree02.vox', { scale: TREE_SCALE }),
@@ -1287,7 +1292,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
     );
     const cpuMeshes = cpuCars.map((car) => car.mesh);
 
-    const p = makeCarGroup(toyota86);
+    const p = makeCarGroup(playerCarMesh);
     player.group = p.group;
     player.tilt = p.tilt;
 
@@ -1353,7 +1358,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
         };
       }
 
-      const sourceMeshes = cpuMeshes.length ? cpuMeshes : [toyota86];
+      const sourceMeshes = cpuMeshes.length ? cpuMeshes : [playerCarMesh];
       const meshPool = Array.from({ length: 4 }, (_, i) => sourceMeshes[i % sourceMeshes.length].clone());
       const customLoopNames = NIHONBASHI_MODE ? [] : Object.keys(info.loops).slice(0, 4);
       customLoopNames.forEach((nm, i) => {
@@ -1457,8 +1462,8 @@ import { AUDIO } from './audio.js?v=20260715-1';
 
     // ドリフトコースにも CPU 車を2台流す(グリッドの車を奪わないよう clone)
     // CPU アセットが少ない場合も、初期ロード済みの車を代替に使う。
-    placeOnLoop(driftLoopPts, (cpuMeshes[13] || cpuMeshes[0] || toyota86).clone(), 0.0, 8, false);
-    placeOnLoop(driftLoopPts, (cpuMeshes[22] || cpuMeshes[1] || toyota86).clone(), 0.5, 7, false);
+    placeOnLoop(driftLoopPts, (cpuMeshes[13] || cpuMeshes[0] || playerCarMesh).clone(), 0.0, 8, false);
+    placeOnLoop(driftLoopPts, (cpuMeshes[22] || cpuMeshes[1] || playerCarMesh).clone(), 0.5, 7, false);
 
     // デモは新しいドリフトコースを走ってヘアピンをドリフトで見せる
     const ds = driftLoopPts[0], dn = driftLoopPts[1];
