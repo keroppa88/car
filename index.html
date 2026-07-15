@@ -44,7 +44,7 @@
   body.title #map-select { display: flex; }
   body.title #loading, body.title #demo, body.title #help,
   body.title #meter, body.title #signal { display: none !important; }
-  .title-card { position: relative; z-index: 1; width: min(800px, calc(100vw - 36px)); text-align: center; }
+  .title-card { position: relative; z-index: 1; width: min(1050px, calc(100vw - 36px)); text-align: center; }
   .title-logo {
     position: relative; display: inline-flex; align-items: flex-end;
     padding: 24px 34px 4px 12px; transform: skewX(-9deg);
@@ -65,15 +65,16 @@
     color: #ef451b; -webkit-text-stroke: 3px #9a1d12;
   }
   .title-sub { margin: 14px 0 30px; color: #176f96; letter-spacing: 0.34em; font-size: 13px; font-weight: 800; }
-  .map-choices { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+  .map-choices { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
   .map-choice {
     min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center;
     color: #222a30; text-decoration: none; border: 2px solid rgba(117,77,39,0.28);
     border-radius: 10px; background: rgba(255,251,230,0.94);
     box-shadow: 0 12px 25px rgba(91,57,25,0.24); transition: 150ms ease;
   }
-  .map-choice:first-child { border-top: 7px solid #e9421d; }
-  .map-choice:last-child { border-top: 7px solid #168bb8; }
+  .map-choice:nth-child(1) { border-top: 7px solid #e9421d; }
+  .map-choice:nth-child(2) { border-top: 7px solid #168bb8; }
+  .map-choice:nth-child(3) { border-top: 7px solid #278953; }
   .map-choice:hover, .map-choice:focus-visible {
     transform: translateY(-4px) skewX(-2deg); border-color: #df3d1e; background: #fffdf0;
     box-shadow: 0 16px 32px rgba(91,57,25,0.32), 0 0 0 3px rgba(22,139,184,0.18);
@@ -176,6 +177,10 @@
         <strong>日本橋</strong>
         <span>日本橋の3DマップをToyota 86で走行</span>
       </a>
+      <a class="map-choice" href="?map=oval">
+        <strong>オーバル</strong>
+        <span>直線と半円カーブをつないだ、すり鉢状のバンクコース</span>
+      </a>
     </div>
   </main>
 </div>
@@ -223,7 +228,7 @@
     document.getElementById('map-select').remove();
     // Bump this value whenever main.js changes so GitHub Pages/CDN caches do
     // not keep an older vehicle list or loader implementation.
-    import('./js/main.js?v=20260715-1');
+    import('./js/main.js?v=20260715-2');
   }
 </script>
 </body>
