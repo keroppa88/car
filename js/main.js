@@ -345,7 +345,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
     forestLoop.push({ x: FOREST_C.x + Math.cos(th) * r, z: FOREST_C.z + Math.sin(th) * r });
   }
   const connector = [];               // straight link: city edge -> loop start
-  {
+  if (!OVAL_MODE) {
     const a = { x: 322, z: H_ROADS[Math.floor(H_ROADS.length / 2)].pos };
     const b = forestLoop[Math.floor(FOREST_N / 2)];   // west point of the loop
     for (let i = 0; i <= 8; i++) connector.push({ x: a.x + (b.x - a.x) * i / 8, z: a.z + (b.z - a.z) * i / 8 });
