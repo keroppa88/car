@@ -920,6 +920,84 @@ import { AUDIO } from './audio.js?v=20260715-1';
     return hit ? hit.point.y : 0;
   }
 
+  // 日本橋の灰色路面を自動判定する。低彩度・中間明度・上向き・同じ地表高に限定。
+  const grayRoadCaster = new THREE.Raycaster();
+  const grayRoadOrigin = new THREE.Vector3();
+  const grayRoadNormal = new THREE.Vector3();
+  function grayRoadSurface(x, z, referenceY) {
+    if (!mapRoot) return null;
+    grayRoadOrigin.set(x, referenceY + 4.5, z);
+    grayRoadCaster.set(grayRoadOrigin, DOWN);
+    grayRoadCaster.far = 9;
+    const hits = grayRoadCaster.intersectObject(mapRoot, true);
+    for (const hit of hits) {
+      if (!hit.face || Math.abs(hit.point.y - referenceY) > 2.5) continue;
+      grayRoadNormal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+      if (grayRoadNormal.y < 0.68) continue;
+      const materials = Array.isArray(hit.object.material)
+        ? hit.object.material
+        : [hit.object.material];
+      const material = materials[hit.face.materialIndex || 0] || materials[0];
+      const color = material && material.color;
+      if (!color) continue;
+      const hi = Math.max(color.r, color.g, color.b);
+      const lo = Math.min(color.r, color.g, color.b);
+      const brightness = (color.r + color.g + color.b) / 3;
+      const grayEnough = hi - lo < Math.max(0.075, brightness * 0.22);
+      if (grayEnough && brightness > 0.07 && brightness < 0.88) {
+        return { x: hit.point.x, y: hit.point.y, z: hit.point.z };
+      }
+    }
+    return null;
+  }
+
+  function grayRoadHeadingAt(p, reverse) {
+    let bestHeading = 0, bestScore = -Infinity;
+    for (let k = 0; k < 12; k++) {
+      const heading = k * Math.PI / 12;
+      let score = 0;
+      for (const d of [7, 13]) {
+        if (grayRoadSurface(p.x + Math.sin(heading) * d, p.z + Math.cos(heading) * d, p.y)) score++;
+        if (grayRoadSurface(p.x - Math.sin(heading) * d, p.z - Math.cos(heading) * d, p.y)) score++;
+      }
+      if (score > bestScore) { bestScore = score; bestHeading = heading; }
+    }
+    return bestHeading + (reverse ? Math.PI : 0);
+  }
+
+  function findGrayRoadSpawns(cx, cz, cy, maxCars) {
+    const found = [];
+    for (let radius = 18; radius <= 180 && found.length < maxCars; radius += 14) {
+      for (let k = 0; k < 24 && found.length < maxCars; k++) {
+        const a = k * Math.PI * 2 / 24;
+        const hit = grayRoadSurface(cx + Math.cos(a) * radius, cz + Math.sin(a) * radius, cy);
+        if (!hit) continue;
+        if (found.every((p) => (p.x - hit.x) ** 2 + (p.z - hit.z) ** 2 > 20 ** 2)) {
+          found.push(hit);
+        }
+      }
+    }
+    return found;
+  }
+
+  function chooseGrayRoadHeading(ai) {
+    const offsets = [0, -Math.PI / 4, Math.PI / 4, -Math.PI / 2, Math.PI / 2, Math.PI];
+    let bestHeading = ai.heading, bestScore = -Infinity;
+    for (const off of offsets) {
+      const heading = ai.heading + off;
+      let score = off === 0 ? 1.2 : (Math.abs(off) === Math.PI ? -1.5 : 0);
+      for (const d of [7, 14]) {
+        score += grayRoadSurface(
+          ai.pos.x + Math.sin(heading) * d,
+          ai.pos.z + Math.cos(heading) * d,
+          ai.pos.y
+        ) ? 1.5 : -1.8;
+      }
+      if (score > bestScore) { bestScore = score; bestHeading = heading; }
+    }
+    return bestHeading;
+  }
+
   // 垂直の構築物(建物・壁)との当たり判定: 車体の高さから進行方向へ短い
   // レイを3本飛ばし、ほぼ垂直な面に当たったら壁とみなして滑らせて止める。
   // 坂や橋のスロープ(面が上を向いている)は素通りするので登坂は妨げない。
@@ -1333,8 +1411,10 @@ import { AUDIO } from './audio.js?v=20260715-1';
         player.heading = 0;
       }
 
+      const isNihonbashi = MAP_GLTF.toLowerCase().endsWith('nihonbashi.gltf');
+
       // 日本橋だけ: 元の開始位置から車長1台分後退し、左へ90度向ける。
-      if (MAP_GLTF.toLowerCase().endsWith('nihonbashi.gltf')) {
+      if (isNihonbashi) {
         const originalHeading = player.heading;
         const carLength = 4.8;
         player.pos.x -= Math.sin(originalHeading) * carLength;
@@ -1351,7 +1431,8 @@ import { AUDIO } from './audio.js?v=20260715-1';
 
       const sourceMeshes = cpuMeshes.length ? cpuMeshes : [toyota86];
       const meshPool = Array.from({ length: 4 }, (_, i) => sourceMeshes[i % sourceMeshes.length].clone());
-      Object.keys(info.loops).slice(0, 4).forEach((nm, i) => {
+      const loopNames = Object.keys(info.loops).slice(0, 4);
+      loopNames.forEach((nm, i) => {
         const wps = info.loops[nm].sort((a, b) => a.i - b.i).map((w) => ({ x: w.p.x, z: w.p.z }));
         if (wps.length < 2) return;
         const g = makeCarGroup(meshPool[i]);
@@ -1362,6 +1443,24 @@ import { AUDIO } from './audio.js?v=20260715-1';
           wps, idx: 1, radius: carRadiusFor(false),
         });
       });
+
+      // ウェイポイントのない日本橋では、灰色路面を見つけて自律走行させる。
+      if (isNihonbashi && loopNames.length === 0) {
+        const roadSpawns = findGrayRoadSpawns(player.pos.x, player.pos.z, player.pos.y, 4);
+        roadSpawns.forEach((sp, i) => {
+          const heading = grayRoadHeadingAt(sp, i % 2 === 1);
+          const g = makeCarGroup(meshPool[i], false, false);
+          aiCars.push({
+            group: g.group, tilt: g.tilt,
+            pos: new THREE.Vector3(sp.x, sp.y, sp.z),
+            heading, v: 0, base: 8.5 + i * 0.8,
+            wps: null, idx: 0, radius: carRadiusFor(false),
+            grayRoadFollower: true,
+            roadHeading: heading,
+            roadDecision: 0.2 + i * 0.12,
+          });
+        });
+      }
       initFx();
 
       // デモ用のドーナツ状ルート(スポーン地点=道路の上を中心に周回ドリフト)
@@ -1664,11 +1763,22 @@ import { AUDIO } from './audio.js?v=20260715-1';
 
   function updateAI(dt, sigStates) {
     for (const ai of aiCars) {
-      const wp = ai.wps[ai.idx];
-      const dx = wp.x - ai.pos.x, dz = wp.z - ai.pos.z;
-      if (dx * dx + dz * dz < 6 * 6) ai.idx = (ai.idx + 1) % ai.wps.length;
+      let targetHeading;
+      if (ai.grayRoadFollower) {
+        ai.roadDecision -= dt;
+        if (ai.roadDecision <= 0) {
+          ai.roadHeading = chooseGrayRoadHeading(ai);
+          ai.roadDecision = 0.55;
+        }
+        targetHeading = ai.roadHeading;
+      } else {
+        const wp = ai.wps[ai.idx];
+        const dx = wp.x - ai.pos.x, dz = wp.z - ai.pos.z;
+        if (dx * dx + dz * dz < 6 * 6) ai.idx = (ai.idx + 1) % ai.wps.length;
+        targetHeading = Math.atan2(dx, dz);
+      }
 
-      let diff = Math.atan2(dx, dz) - ai.heading;
+      let diff = targetHeading - ai.heading;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
       ai.heading += clamp(diff, -1.7 * dt, 1.7 * dt);
