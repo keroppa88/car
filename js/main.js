@@ -1465,11 +1465,18 @@ import { AUDIO } from './audio.js?v=20260715-1';
     placeOnLoop(driftLoopPts, (cpuMeshes[13] || cpuMeshes[0] || playerCarMesh).clone(), 0.0, 8, false);
     placeOnLoop(driftLoopPts, (cpuMeshes[22] || cpuMeshes[1] || playerCarMesh).clone(), 0.5, 7, false);
 
-    // デモは新しいドリフトコースを走ってヘアピンをドリフトで見せる
-    const ds = driftLoopPts[0], dn = driftLoopPts[1];
+    // 架空マップのデモ場所は、街・外周・森林・峠から毎回ランダム。
+    // 同じコースが選ばれても開始地点をずらす。
+    const demoCandidates = [...loopDefs, driftLoopPts].filter((route) => route && route.length >= 2);
+    const pickedDemoRoute = demoCandidates[Math.floor(Math.random() * demoCandidates.length)];
+    const demoStartIndex = Math.floor(Math.random() * pickedDemoRoute.length);
+    const randomDemoRoute = pickedDemoRoute
+      .slice(demoStartIndex)
+      .concat(pickedDemoRoute.slice(0, demoStartIndex));
+    const ds = randomDemoRoute[0], dn = randomDemoRoute[1];
     player.pos.set(ds.x, courseHeightAt(ds.x, ds.z), ds.z);
     player.heading = Math.atan2(dn.x - ds.x, dn.z - ds.z);
-    enterDemo(driftLoopPts);
+    enterDemo(randomDemoRoute);
     document.getElementById('loading').remove();
     window.__voxDrive = { player, aiCars, start: () => startGame(), inDemo: () => demoActive };
     requestAnimationFrame(tick);
