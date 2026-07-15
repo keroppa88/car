@@ -2,10 +2,10 @@
 
 three.js の平面ワールドを、MagicaVoxel (.vox) 形式の車で走り回るゲームです。
 
-- **Toyota 86** … プレイヤー操作車
-- **CPU 車** … 起動時に `vox/` 直下を自動確認し、プレイヤー用の `toyota86.vox` 以外すべて
+- **Toyota 86 / Volvo 240** … タイトル画面で選択するプレイヤー操作車
+- **CPU 車** … 起動時に `vox/` 直下を自動確認し、選択中のプレイヤー車以外を使用
   (kabu, nissan, 180sx, toyotahigh, probox, vw, volvo_sedan …)。街(`?map=city`)
-  では全車種が道路を左側通行で走り回る
+  では全車種が道路を左側通行で走り回る。日本橋ではCPU車を配置しない
 - **vox/object/tree01.vox / tree02.vox** … フィールドにランダム配置される樹木(当たり判定あり)
 
 `vox/` 直下は車両専用、コース上の樹木などは `vox/object/` に置きます。
@@ -110,13 +110,15 @@ python3 -m http.server 8000
 
 ## マップ
 
-ルートURLではタイトル画面が開き、**「架空」または「日本橋」**を選択できる。
-URL パラメータで直接開始することもできる:
+ルートURLではタイトル画面が開き、**「Toyota 86」または「Volvo 240」**を選んでから、
+**「架空」または「日本橋」**を選択できる。URL パラメータで直接開始することもできる:
 
 ```
 http://localhost:8000/                        … タイトル / マップ選択
-http://localhost:8000/?map=city              … 架空都市 + 森 + 信号 + 峠
-http://localhost:8000/?map=nihonbashi.gltf   … 日本橋
+http://localhost:8000/?map=city&car=toyota86            … 架空 / Toyota 86
+http://localhost:8000/?map=city&car=volvo240             … 架空 / Volvo 240
+http://localhost:8000/?map=nihonbashi.gltf&car=toyota86  … 日本橋 / Toyota 86
+http://localhost:8000/?map=nihonbashi.gltf&car=volvo240  … 日本橋 / Volvo 240
 http://localhost:8000/?map=maps/sample.glb   … 任意の glTF/GLB マップ
 ```
 
