@@ -228,7 +228,14 @@
     document.getElementById('map-select').remove();
     // Bump this value whenever main.js changes so GitHub Pages/CDN caches do
     // not keep an older vehicle list or loader implementation.
-    import('./js/main.js?v=20260715-2');
+    import('./js/main.js?v=20260715-3').catch((err) => {
+      const loading = document.getElementById('loading');
+      if (loading) {
+        loading.innerHTML = '<div class="err">読み込みに失敗しました。'
+          + '<br><small>' + err.message + '</small></div>';
+      }
+      console.error(err);
+    });
   }
 </script>
 </body>
