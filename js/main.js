@@ -634,7 +634,6 @@ import { AUDIO } from './audio.js?v=20260715-1';
     scene.add(driftShoulder.build(true));
     scene.add(asphalt.build(true));
     scene.add(paint.build(false));
-    scene.add(patches.build(true));
 
     // 地面も同じすり鉢形状にし、路面直下だけ少し掘り下げる。
     const gpos = ground.geometry.attributes.position;
