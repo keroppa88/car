@@ -64,7 +64,20 @@
     display: inline-block; margin-left: 0.02em; font-size: 1.45em; line-height: 0.7;
     color: #ef451b; -webkit-text-stroke: 3px #9a1d12;
   }
-  .title-sub { margin: 14px 0 30px; color: #176f96; letter-spacing: 0.34em; font-size: 13px; font-weight: 800; }
+  .title-sub { margin: 14px 0 12px; color: #176f96; letter-spacing: 0.34em; font-size: 13px; font-weight: 800; }
+  .course-label { margin-top: 24px; }
+  .car-choices { display: flex; justify-content: center; gap: 14px; }
+  .car-choice {
+    min-width: 190px; padding: 13px 22px; border: 2px solid rgba(117,77,39,0.32);
+    border-radius: 9px; color: #293139; background: rgba(255,251,230,0.9);
+    font: 800 18px/1.2 "Arial Black", "Yu Gothic", Meiryo, sans-serif;
+    cursor: pointer; transition: 140ms ease;
+  }
+  .car-choice:hover { transform: translateY(-2px); border-color: #168bb8; }
+  .car-choice.active {
+    color: #fff; border-color: #c6321b; background: linear-gradient(135deg, #ef6b20, #d5351b);
+    box-shadow: 0 8px 18px rgba(123,37,18,0.28), 0 0 0 3px rgba(22,139,184,0.16);
+  }
   .map-choices { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
   .map-choice {
     min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -85,6 +98,8 @@
     .logo-kicker { left: 10px; }
     .logo-name { font-size: clamp(40px, 13vw, 58px); -webkit-text-stroke-width: 1.5px; }
     .logo-t { -webkit-text-stroke-width: 2px; }
+    .car-choices { flex-direction: column; gap: 8px; }
+    .car-choice { width: 100%; min-width: 0; padding: 10px 16px; }
     .map-choices { grid-template-columns: 1fr; }
     .map-choice { min-height: 120px; }
   }
@@ -166,7 +181,12 @@
       <span class="logo-kicker">TOUGE DRIFT RACING</span>
       <span class="logo-name">イニシャル<span class="logo-t">T</span></span>
     </div>
-    <div class="title-sub">SELECT COURSE</div>
+    <div class="title-sub">SELECT CAR</div>
+    <div class="car-choices" role="group" aria-label="ユーザー車を選択">
+      <button class="car-choice active" type="button" data-car="toyota86" aria-pressed="true">Toyota 86</button>
+      <button class="car-choice" type="button" data-car="volvo240" aria-pressed="false">Volvo 240</button>
+    </div>
+    <div class="title-sub course-label">SELECT COURSE</div>
     <div class="map-choices">
       <a class="map-choice" href="?map=city">
         <strong>架空</strong>
@@ -219,11 +239,32 @@
   const mapParam = new URLSearchParams(location.search).get('map');
   if (mapParam === null) {
     document.body.classList.add('title');
+    let selectedCar = 'toyota86';
+    const carButtons = Array.from(document.querySelectorAll('.car-choice'));
+    const setSelectedCar = (car) => {
+      selectedCar = car;
+      for (const button of carButtons) {
+        const active = button.dataset.car === car;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      }
+    };
+    for (const button of carButtons) {
+      button.addEventListener('click', () => setSelectedCar(button.dataset.car));
+    }
+    for (const link of document.querySelectorAll('.map-choice')) {
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
+        const url = new URL(link.getAttribute('href'), location.href);
+        url.searchParams.set('car', selectedCar);
+        location.href = url.href;
+      });
+    }
   } else {
     document.getElementById('map-select').remove();
     // Bump this value whenever main.js changes so GitHub Pages/CDN caches do
     // not keep an older vehicle list or loader implementation.
-    import('./js/main.js?v=20260715-7');
+    import('./js/main.js?v=20260715-8');
   }
 </script>
 </body>
