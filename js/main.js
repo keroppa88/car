@@ -18,8 +18,10 @@ import { AUDIO } from './audio.js?v=20260715-1';
   //   ?map=nihonbashi.gltf … 日本橋マップを読む
   //   ?map=maps/sample.glb … 別の glTF/GLB マップを読む
   //   ?map=city            … デフォルトと同じ自動生成マップ
+  //   ?map=oval            … 直線 + 半円カーブのバンク付きオーバル
   const mapParam = new URLSearchParams(location.search).get('map');
-  const MAP_GLTF = mapParam === null || ['', 'city', 'procedural', 'none', '0'].includes(mapParam)
+  const OVAL_MODE = mapParam === 'oval';
+  const MAP_GLTF = OVAL_MODE || mapParam === null || ['', 'city', 'procedural', 'none', '0'].includes(mapParam)
     ? ''
     : mapParam;
   let mapRoot = null;              // set when a custom map is loaded (ground raycasts)
@@ -204,11 +206,11 @@ import { AUDIO } from './audio.js?v=20260715-1';
     if (!arr.some((r) => r.four)) { arr[1].four = true; arr[1].w = 14; }
     return arr;
   }
-  const V_ROADS = genRoadLine();      // roads running along z, at x = pos
-  const H_ROADS = genRoadLine();      // roads running along x, at z = pos
+  const V_ROADS = OVAL_MODE ? [] : genRoadLine(); // roads running along z, at x = pos
+  const H_ROADS = OVAL_MODE ? [] : genRoadLine(); // roads running along x, at z = pos
   // たまに斜めの道路(このシードでは1本、45°)
   const DIAGS = [];
-  if (cityRnd() < 0.8) {
+  if (!OVAL_MODE && cityRnd() < 0.8) {
     DIAGS.push({ cx: -40 + cityRnd() * 80, cz: -40 + cityRnd() * 80, yaw: Math.PI / 4, w: 8, four: false });
   }
 
@@ -234,6 +236,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
   const patches = new QuadBatch(0x3d3d42);
   const driftShoulder = new QuadBatch(0x34363a);
   const PERIMETER_ROAD = { w: 8, four: false };
+  const signals = [];                 // signalized grid intersections
 
   // Lane markings for one road, in the road's local frame (length along z).
   function addMarkings(cx, cz, yaw, road, roadLength = ROAD_LEN) {
@@ -255,6 +258,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
     }
   }
 
+  if (!OVAL_MODE) {
   for (const r of V_ROADS) {
     asphalt.add(r.pos, 0, r.w, ROAD_LEN, 0, 0.03);
     addMarkings(r.pos, 0, 0, r);
@@ -282,7 +286,6 @@ import { AUDIO } from './audio.js?v=20260715-1';
   }
 
   // Plain asphalt patches hide the markings inside every intersection.
-  const signals = [];                 // signalized grid intersections
   for (const v of V_ROADS) {
     for (const h of H_ROADS) {
       patches.add(v.pos, h.pos, v.w, h.w, 0, 0.09);
@@ -324,6 +327,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
       patches.add(d.cx + dirx * t, d.cz + dirz * t, 12, 12, d.yaw, 0.095);
     }
   }
+  }
 
   // ----- forest course (suburb, east of the city) -----
   // A meandering 2-lane loop through dense woods, reached by a short
@@ -362,10 +366,106 @@ import { AUDIO } from './audio.js?v=20260715-1';
       if (i % 2 === 0) paint.add(mx, mz, 0.15, len, yaw, 0.06);          // 中央線(破線)
     }
   }
-  paveRoute(forestLoop, true);
-  paveRoute(connector, false);
-  patches.add(connector[0].x, connector[0].z, 10, 10, 0, 0.095);          // junction mouths
-  patches.add(connector[8].x, connector[8].z, 11, 11, Math.PI / 4, 0.095);
+  if (!OVAL_MODE) {
+    paveRoute(forestLoop, true);
+    paveRoute(connector, false);
+    patches.add(connector[0].x, connector[0].z, 10, 10, 0, 0.095);        // junction mouths
+    patches.add(connector[8].x, connector[8].z, 11, 11, Math.PI / 4, 0.095);
+  }
+
+  // ----- oval course: straights + semicircle curves + progressive banking -----
+  const OVAL_STRAIGHT_HALF = 120;
+  const OVAL_RADIUS = 70;
+  const OVAL_TRACK_WIDTH = 24;
+
+  function smooth01(t) {
+    t = clamp(t, 0, 1);
+    return t * t * (3 - 2 * t);
+  }
+
+  function ovalRadialDistance(x, z) {
+    const qx = Math.max(Math.abs(x) - OVAL_STRAIGHT_HALF, 0);
+    return Math.hypot(qx, z);
+  }
+
+  // 直線は緩いすり鉢、半円カーブは外側が最大8m高いフルバンク。
+  function ovalHeightAt(x, z, sample) {
+    const radial = ovalRadialDistance(x, z);
+    const roadDistance = Math.abs(radial - OVAL_RADIUS);
+    if (sample) sample.roadDistance = roadDistance;
+
+    const inner = OVAL_RADIUS - OVAL_TRACK_WIDTH / 2;
+    const outer = OVAL_RADIUS + OVAL_TRACK_WIDTH / 2;
+    const curveMix = smooth01((Math.abs(x) - (OVAL_STRAIGHT_HALF - 24)) / 52);
+    const bankRise = 1.2 + curveMix * 6.8;
+
+    if (radial < inner) {
+      return 0.18 * smooth01((radial - (inner - 36)) / 36);
+    }
+    if (radial <= outer) {
+      return 0.18 + bankRise * ((radial - inner) / OVAL_TRACK_WIDTH);
+    }
+    const outside = smooth01((radial - outer) / 40);
+    return 0.18 + bankRise - outside * 0.45;
+  }
+
+  function buildOvalLoop() {
+    const pts = [];
+    const straightSteps = 60, curveSteps = 48;
+    for (let i = 0; i <= straightSteps; i++) {
+      pts.push({
+        x: -OVAL_STRAIGHT_HALF + 2 * OVAL_STRAIGHT_HALF * i / straightSteps,
+        z: OVAL_RADIUS,
+      });
+    }
+    for (let i = 1; i <= curveSteps; i++) {
+      const a = Math.PI / 2 - Math.PI * i / curveSteps;
+      pts.push({
+        x: OVAL_STRAIGHT_HALF + Math.cos(a) * OVAL_RADIUS,
+        z: Math.sin(a) * OVAL_RADIUS,
+      });
+    }
+    for (let i = 1; i <= straightSteps; i++) {
+      pts.push({
+        x: OVAL_STRAIGHT_HALF - 2 * OVAL_STRAIGHT_HALF * i / straightSteps,
+        z: -OVAL_RADIUS,
+      });
+    }
+    for (let i = 1; i <= curveSteps; i++) {
+      const a = -Math.PI / 2 - Math.PI * i / curveSteps;
+      pts.push({
+        x: -OVAL_STRAIGHT_HALF + Math.cos(a) * OVAL_RADIUS,
+        z: Math.sin(a) * OVAL_RADIUS,
+      });
+    }
+    return pts;
+  }
+
+  const ovalLoopPts = buildOvalLoop();
+
+  function paveOvalCourse() {
+    for (let i = 0; i < ovalLoopPts.length; i++) {
+      const p = ovalLoopPts[i], q = ovalLoopPts[(i + 1) % ovalLoopPts.length];
+      const dx = q.x - p.x, dz = q.z - p.z;
+      const len = Math.hypot(dx, dz);
+      if (len < 0.01) continue;
+      const yaw = Math.atan2(dx, dz), co = Math.cos(yaw), si = Math.sin(yaw);
+      const steps = Math.max(1, Math.ceil(len / 3));
+      for (let k = 0; k < steps; k++) {
+        const t0 = k / steps, t1 = (k + 1) / steps;
+        const ax = p.x + dx * t0, az = p.z + dz * t0;
+        const bx = p.x + dx * t1, bz = p.z + dz * t1;
+        const mx = (ax + bx) / 2, mz = (az + bz) / 2, sl = len / steps;
+        driftShoulder.addSloped(mx, mz, 29, sl + 0.9, yaw, ovalHeightAt, 0.0);
+        asphalt.addSloped(mx, mz, OVAL_TRACK_WIDTH, sl + 0.7, yaw, ovalHeightAt, 0.07);
+        paint.addSloped(mx + 11.2 * co, mz - 11.2 * si, 0.22, sl + 0.5, yaw, ovalHeightAt, 0.11);
+        paint.addSloped(mx - 11.2 * co, mz + 11.2 * si, 0.22, sl + 0.5, yaw, ovalHeightAt, 0.11);
+        if ((i + k) % 3 === 0) {
+          paint.addSloped(mx, mz, 0.16, sl * 0.72, yaw, ovalHeightAt, 0.11);
+        }
+      }
+    }
+  }
 
   // ----- drift course (街の南): 短い直線とヘアピンが連続する峠コース -----
   // 左右2ブロックの密な蛇行レイアウト。約80mごとに180°ターンが来る。
@@ -435,6 +535,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
   // 道路に近い区間の標高を合成して、道路と周囲の地表を同じ峠形状にする。
   // sample を渡した場合は、地表の路盤処理用に道路までの距離も返す。
   function courseHeightAt(x, z, sample) {
+    if (OVAL_MODE) return ovalHeightAt(x, z, sample);
     if (sample) sample.roadDistance = Infinity;
     if (z <= 350 || z >= 620 || x <= -280 || x >= 215) return 0;
     let closestD2 = Infinity, weightedHeight = 0, weightSum = 0;
@@ -491,7 +592,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
     }
   }
 
-  if (!MAP_GLTF) {
+  if (!MAP_GLTF && !OVAL_MODE) {
     BOUND_X_MIN = -350;              // 西側の外周道路まで走行可能にする
     BOUND_Z = 620;                   // 南のドリフトコースまで走れるように拡張
     paveCourse(driftLoopPts);
@@ -521,6 +622,33 @@ import { AUDIO } from './audio.js?v=20260715-1';
       const cutT = 1 - clamp((terrainSample.roadDistance - 12) / 12, 0, 1);
       const roadbedCut = 0.55 * cutT * cutT * (3 - 2 * cutT);
       gpos.setZ(i, height - roadbedCut);               // ローカル Z -> ワールド Y
+    }
+    gpos.needsUpdate = true;
+    ground.geometry.computeVertexNormals();
+  } else if (OVAL_MODE) {
+    BOUND_X_MIN = -225;
+    BOUND_X_MAX = 225;
+    BOUND_Z = 125;
+    signals.length = 0;
+    paveOvalCourse();
+    scene.add(driftShoulder.build(true));
+    scene.add(asphalt.build(true));
+    scene.add(paint.build(false));
+    scene.add(patches.build(true));
+
+    // 地面も同じすり鉢形状にし、路面直下だけ少し掘り下げる。
+    const gpos = ground.geometry.attributes.position;
+    const terrainSample = { roadDistance: Infinity };
+    for (let i = 0; i < gpos.count; i++) {
+      const wx = gpos.getX(i) + ground.position.x;
+      const wz = -gpos.getY(i);
+      const height = ovalHeightAt(wx, wz, terrainSample);
+      const cutT = 1 - clamp(
+        (terrainSample.roadDistance - OVAL_TRACK_WIDTH / 2) / 8,
+        0,
+        1
+      );
+      gpos.setZ(i, height - 0.28 * smooth01(cutT));
     }
     gpos.needsUpdate = true;
     ground.geometry.computeVertexNormals();
@@ -1280,7 +1408,9 @@ import { AUDIO } from './audio.js?v=20260715-1';
       VOX.load('vox/object/tree02.vox', { scale: TREE_SCALE }),
     ]);
     const discoveredCpuVox = await discoverCpuCarVox();
-    const cpuCars = await loadCpuCars(MAP_GLTF ? discoveredCpuVox.slice(0, 4) : discoveredCpuVox);
+    const cpuCars = await loadCpuCars(
+      (MAP_GLTF || OVAL_MODE) ? discoveredCpuVox.slice(0, OVAL_MODE ? 8 : 4) : discoveredCpuVox
+    );
     const cpuMeshes = cpuCars.map((car) => car.mesh);
 
     const p = makeCarGroup(toyota86);
@@ -1356,6 +1486,38 @@ import { AUDIO } from './audio.js?v=20260715-1';
       }
       enterDemo(demoDonut);
 
+      document.getElementById('loading').remove();
+      window.__voxDrive = { player, aiCars, start: () => startGame(), inDemo: () => demoActive };
+      requestAnimationFrame(tick);
+      return;
+    }
+
+    if (OVAL_MODE) {
+      const ovalWps = ovalLoopPts.filter((_, i) => i % 2 === 0);
+      const spawnIndex = 18;
+      const sp = ovalWps[spawnIndex], sn = ovalWps[(spawnIndex + 1) % ovalWps.length];
+      const spawnHeading = Math.atan2(sn.x - sp.x, sn.z - sp.z);
+      player.pos.set(sp.x, ovalHeightAt(sp.x, sp.z), sp.z);
+      player.heading = spawnHeading;
+      gameSpawn = { x: sp.x, z: sp.z, heading: spawnHeading };
+
+      cpuMeshes.slice(0, 8).forEach((mesh, i) => {
+        const wi = Math.floor(i * ovalWps.length / 8) % ovalWps.length;
+        const wp = ovalWps[wi], wn = ovalWps[(wi + 1) % ovalWps.length];
+        const bike = /\/kabu\d*\.vox$/.test(cpuCars[i].url);
+        const g = makeCarGroup(mesh, false, bike);
+        aiCars.push({
+          group: g.group, tilt: g.tilt,
+          pos: new THREE.Vector3(wp.x, ovalHeightAt(wp.x, wp.z), wp.z),
+          heading: Math.atan2(wn.x - wp.x, wn.z - wp.z),
+          v: 0, base: 13 + (i % 4) * 1.5,
+          wps: ovalWps, idx: (wi + 1) % ovalWps.length,
+          radius: carRadiusFor(bike),
+        });
+      });
+
+      initFx();
+      enterDemo(ovalWps);
       document.getElementById('loading').remove();
       window.__voxDrive = { player, aiCars, start: () => startGame(), inDemo: () => demoActive };
       requestAnimationFrame(tick);
@@ -1496,7 +1658,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
 
   // ------------------------------------------------------------- update ---
   function updatePlayer(dt) {
-    if (demoActive) player.gear = 3;   // デモは2速(~40km/h)でヘアピンをドリフト
+    if (demoActive) player.gear = OVAL_MODE ? 5 : 3; // オーバルは4速、峠は2速でデモ
     // gears
     if (shiftUp) { player.gear = Math.min(player.gear + 1, GEARS.length - 1); shiftUp = false; }
     if (shiftDown) { player.gear = Math.max(player.gear - 1, 0); shiftDown = false; }
@@ -1590,7 +1752,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
     for (const ai of aiCars) collideCircle(ai.group.position.x, ai.group.position.z, ai.radius);
 
     // custom maps: collide with vertical structures, ride on the surface
-    let slopePitch = 0;
+    let slopePitch = 0, slopeRoll = 0;
     if (mapRoot) {
       collideWalls(dt);
       const gy = groundHeightAt(player.pos.x, player.pos.y, player.pos.z);
@@ -1603,6 +1765,11 @@ import { AUDIO } from './audio.js?v=20260715-1';
       const hF = courseHeightAt(player.pos.x + hx, player.pos.z + hz);
       const hB = courseHeightAt(player.pos.x - hx, player.pos.z - hz);
       slopePitch = Math.atan2(hF - hB, 6);   // 登りで + / 下りで -
+      if (OVAL_MODE) {
+        const hL = courseHeightAt(player.pos.x + sx * 1.4, player.pos.z + sz * 1.4);
+        const hR = courseHeightAt(player.pos.x - sx * 1.4, player.pos.z - sz * 1.4);
+        slopeRoll = Math.atan2(hR - hL, 2.8);
+      }
     }
 
     // visuals
@@ -1611,7 +1778,11 @@ import { AUDIO } from './audio.js?v=20260715-1';
     const acc = (vF - vBefore) / Math.max(dt, 1e-4);
     player.accSmooth += (acc - player.accSmooth) * Math.min(1, dt * 5);
     // 車体は外側へロール(右に曲がると左へ, 左に曲がると右へ傾く)
-    player.tilt.rotation.z = clamp(player.steer * vF * 0.010 + vS * 0.008, -0.09, 0.09);
+    player.tilt.rotation.z = clamp(
+      player.steer * vF * 0.010 + vS * 0.008 + slopeRoll,
+      OVAL_MODE ? -0.38 : -0.09,
+      OVAL_MODE ? 0.38 : 0.09
+    );
     // 加速ピッチ + 坂の傾き(登りは車首上げ)
     player.tilt.rotation.x = clamp(player.accSmooth * 0.006 - slopePitch, -0.28, 0.28);
 
@@ -1675,7 +1846,18 @@ import { AUDIO } from './audio.js?v=20260715-1';
 
       ai.group.position.copy(ai.pos);
       ai.group.rotation.y = ai.heading;
-      ai.tilt.rotation.z = clamp(diff * ai.v * 0.006, -0.04, 0.04);   // 外側へロール
+      let aiBankRoll = 0;
+      if (OVAL_MODE) {
+        const sideX = -Math.cos(ai.heading), sideZ = Math.sin(ai.heading);
+        const hL = courseHeightAt(ai.pos.x + sideX * 1.4, ai.pos.z + sideZ * 1.4);
+        const hR = courseHeightAt(ai.pos.x - sideX * 1.4, ai.pos.z - sideZ * 1.4);
+        aiBankRoll = Math.atan2(hR - hL, 2.8);
+      }
+      ai.tilt.rotation.z = clamp(
+        diff * ai.v * 0.006 + aiBankRoll,
+        OVAL_MODE ? -0.38 : -0.04,
+        OVAL_MODE ? 0.38 : 0.04
+      );
     }
   }
 
