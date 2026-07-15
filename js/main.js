@@ -42,7 +42,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
   // ユーザーが何か操作するとゲーム開始。
   let demoActive = false;
   let startGame = function () {};   // init 内で本体を差し込む
-  let gameSpawn = null;             // デモ解除時に戻る通常スポーン {x,z,heading}
+  let gameSpawn = null;             // デモ解除時に戻る通常スポーン {x,y?,z,heading}
 
   // ------------------------------------------------------------- input ----
   const keys = {};
@@ -1332,6 +1332,23 @@ import { AUDIO } from './audio.js?v=20260715-1';
         }
         player.heading = 0;
       }
+
+      // 日本橋だけ: 元の開始位置から車長1台分後退し、左へ90度向ける。
+      if (MAP_GLTF.toLowerCase().endsWith('nihonbashi.gltf')) {
+        const originalHeading = player.heading;
+        const carLength = 4.8;
+        player.pos.x -= Math.sin(originalHeading) * carLength;
+        player.pos.z -= Math.cos(originalHeading) * carLength;
+        player.heading += Math.PI / 2;
+        player.pos.y = groundHeightAt(player.pos.x, 500, player.pos.z);
+        gameSpawn = {
+          x: player.pos.x,
+          y: player.pos.y,
+          z: player.pos.z,
+          heading: player.heading,
+        };
+      }
+
       const sourceMeshes = cpuMeshes.length ? cpuMeshes : [toyota86];
       const meshPool = Array.from({ length: 4 }, (_, i) => sourceMeshes[i % sourceMeshes.length].clone());
       Object.keys(info.loops).slice(0, 4).forEach((nm, i) => {
@@ -1471,7 +1488,10 @@ import { AUDIO } from './audio.js?v=20260715-1';
     player.gear = 2;
     player.steer = 0;
     if (gameSpawn) {                 // デモの位置(コース上)から通常スポーンへ戻す
-      player.pos.set(gameSpawn.x, courseHeightAt(gameSpawn.x, gameSpawn.z), gameSpawn.z);
+      const spawnY = Number.isFinite(gameSpawn.y)
+        ? gameSpawn.y
+        : courseHeightAt(gameSpawn.x, gameSpawn.z);
+      player.pos.set(gameSpawn.x, spawnY, gameSpawn.z);
       player.heading = gameSpawn.heading;
     }
     cam.yaw = 0; cam.pitch = 0.34; cam.dist = 10; cam.lastDrag = 0;
