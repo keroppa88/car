@@ -53,6 +53,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
   let missionCpuCars = [];          // 読み込み済み CPU 車 [{url, mesh}]
   let missionRingWps = null;        // 犯人が回遊する外周ルート
   let missionEnabled = false;
+  let missionHit = false;           // このフレームで犯人車に接触したか
   const mission = { phase: 'off', queue: [], active: null, nextAt: 0 };  // off/waiting/active/done
 
   // ------------------------------------------------------------- input ----
@@ -1452,9 +1453,21 @@ import { AUDIO } from './audio.js?v=20260715-1';
       });
     }
 
+    // 緊急指令のシナリオを先に読み込む。犯人と同じ車種は一般CPU車として出さない
+    // (見た目が同じ車が複数走ると、どれが犯人か分からなくなるため)。
+    missionScenarios = await loadScenarios();
+    missionCpuCars = cpuCars;             // 犯人メッシュ参照用に全車種を保持
+    missionRingWps = loopDefs[4];         // 犯人が高速回遊する外周環状
+    missionEnabled = missionScenarios.length > 0 && missionCpuCars.length > 0;
+    const scenarioFiles = new Set(missionScenarios.map((s) => s.car.toLowerCase()));
+    const trafficCars = cpuCars.filter(
+      (c) => !scenarioFiles.has(decodeURIComponent(c.url.split('/').pop()).toLowerCase())
+    );
+    const trafficMeshes = trafficCars.map((c) => c.mesh);
+
     // CPU 車をグリッドの5コースへ散らす(デモは別コースなので全ループを使う)
-    cpuMeshes.forEach((mesh, i) => {
-      const bike = /\/kabu\d*\.vox$/.test(cpuCars[i].url);   // スーパーカブはバイク
+    trafficMeshes.forEach((mesh, i) => {
+      const bike = /(^|\/)kabu\d*\.vox$/i.test(trafficCars[i].url);   // スーパーカブはバイク
       const loop = loopDefs[i % loopDefs.length];
       const frac = (i * 0.37) % 1;         // ルート上に散らす
       placeOnLoop(loop, mesh, frac, 7 + (i % 5), bike);   // 25〜40 km/h でばらつき
@@ -1469,14 +1482,8 @@ import { AUDIO } from './audio.js?v=20260715-1';
 
     // ドリフトコースにも CPU 車を2台流す(グリッドの車を奪わないよう clone)
     // CPU アセットが少ない場合も、初期ロード済みの車を代替に使う。
-    placeOnLoop(driftLoopPts, (cpuMeshes[13] || cpuMeshes[0] || playerCarMesh).clone(), 0.0, 8, false);
-    placeOnLoop(driftLoopPts, (cpuMeshes[22] || cpuMeshes[1] || playerCarMesh).clone(), 0.5, 7, false);
-
-    // 緊急指令(ミッション)を有効化。犯人車両は外周環状(loopDefs[4])を高速回遊。
-    missionCpuCars = cpuCars;
-    missionRingWps = loopDefs[4];
-    missionScenarios = await loadScenarios();
-    missionEnabled = missionScenarios.length > 0 && missionCpuCars.length > 0;
+    placeOnLoop(driftLoopPts, (trafficMeshes[13] || trafficMeshes[0] || playerCarMesh).clone(), 0.0, 8, false);
+    placeOnLoop(driftLoopPts, (trafficMeshes[22] || trafficMeshes[1] || playerCarMesh).clone(), 0.5, 7, false);
 
     // ワンダーランドのデモ場所は、街・外周・森林・峠から毎回ランダム。
     // 同じコースが選ばれても開始地点をずらす。
@@ -1606,7 +1613,9 @@ import { AUDIO } from './audio.js?v=20260715-1';
     else missionObjEl.classList.remove('show');
   }
   function missionTargetLabel(msg) {
-    const m = msg.match(/(?:逃亡中の|逃走中の|逃亡している)(.+?)を(?:追跡|確保)/);
+    const m = msg.match(/(?:逃亡中の|逃走中の|逃亡している|逃走している)(.{2,24}?)を(?:追跡|確保)/)
+      || msg.match(/([^。、]{2,24}?)を(?:追跡|確保)/)
+      || msg.match(/([^。、]{2,24}?)が(?:逃走|逃亡)/);
     return m ? m[1] : '犯人車両';
   }
   function missionFindMesh(carFile) {
@@ -1627,12 +1636,13 @@ import { AUDIO } from './audio.js?v=20260715-1';
     const wps = missionRingWps;
     const s = Math.floor(Math.random() * wps.length);
     const a = wps[s], b = wps[(s + 1) % wps.length];
-    const g = makeCarGroup(mesh.clone(), false, false);
+    const bike = /(^|\/)kabu\d*\.vox$/i.test(sc.car);   // カブはバイク: 影・当たりを小さく
+    const g = makeCarGroup(mesh.clone(), false, bike);
     const crim = {
       group: g.group, tilt: g.tilt,
       pos: new THREE.Vector3(a.x, 0, a.z),
       heading: Math.atan2(b.x - a.x, b.z - a.z), v: 0, base: 32,   // 32 m/s ≒ 115 km/h
-      wps, idx: (s + 1) % wps.length, radius: carRadiusFor(false), criminal: true,
+      wps, idx: (s + 1) % wps.length, radius: carRadiusFor(bike), criminal: true,
     };
     aiCars.push(crim);
     mission.active = crim;
@@ -1656,12 +1666,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
   function updateMission() {
     if (!missionEnabled || demoActive) return;
     if (mission.phase === 'waiting' && performance.now() >= mission.nextAt) missionIssue();
-    else if (mission.phase === 'active' && mission.active) {
-      const c = mission.active;
-      const dx = player.pos.x - c.pos.x, dz = player.pos.z - c.pos.z;
-      const reach = player.radius + c.radius + 1.2;   // 体当たりで確保
-      if (dx * dx + dz * dz < reach * reach) missionCapture();
-    }
+    else if (mission.phase === 'active' && mission.active && missionHit) missionCapture();
   }
 
   // ------------------------------------------------------------- update ---
@@ -1758,6 +1763,16 @@ import { AUDIO } from './audio.js?v=20260715-1';
     }
     for (const o of obstacles) collideCircle(o.x, o.z, o.r);
     for (const ai of aiCars) collideCircle(ai.group.position.x, ai.group.position.z, ai.radius);
+
+    // 犯人車への接触判定は、犯人が updateAI で動く前(=衝突を解決したこの時点)で行う。
+    // 高速で毎フレーム約1.6m進むため、動いた後だと射程から外れて取り逃がしてしまう。
+    missionHit = false;
+    if (mission.active) {
+      const c = mission.active;
+      const dx = player.pos.x - c.pos.x, dz = player.pos.z - c.pos.z;
+      const reach = player.radius + c.radius + 1.6;   // 体当たりで確保
+      if (dx * dx + dz * dz < reach * reach) missionHit = true;
+    }
 
     // custom maps: collide with vertical structures, ride on the surface
     let slopePitch = 0;
