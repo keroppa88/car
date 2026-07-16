@@ -86,7 +86,7 @@
     box-shadow: 0 12px 25px rgba(91,57,25,0.24); transition: 150ms ease;
   }
   .map-choice:first-child { border-top: 7px solid #e9421d; }
-  .map-choice:last-child { border-top: 7px solid #168bb8; }
+  .map-choice:last-child { border-top: 7px solid #e9421d; }
   .map-choice:hover, .map-choice:focus-visible {
     transform: translateY(-4px) skewX(-2deg); border-color: #df3d1e; background: #fffdf0;
     box-shadow: 0 16px 32px rgba(91,57,25,0.32), 0 0 0 3px rgba(22,139,184,0.18);
@@ -189,12 +189,12 @@
     <div class="title-sub course-label">SELECT COURSE</div>
     <div class="map-choices">
       <a class="map-choice" href="?map=city">
-        <strong>架空</strong>
+        <strong>ワンダーランド</strong>
         <span>環状都市・森林コース・峠の連続ヘアピン</span>
       </a>
       <a class="map-choice" href="?map=nihonbashi.gltf">
         <strong>日本橋</strong>
-        <span>日本橋の3DマップをToyota 86で走行</span>
+        <span>Tokyo・日本橋周辺マップ</span>
       </a>
     </div>
   </main>
@@ -264,7 +264,7 @@
     document.getElementById('map-select').remove();
     // Bump this value whenever main.js changes so GitHub Pages/CDN caches do
     // not keep an older vehicle list or loader implementation.
-    import('./js/main.js?v=20260715-9');
+    import('./js/main.js?v=20260716-1');
   }
 </script>
 </body>
