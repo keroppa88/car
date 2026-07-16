@@ -1272,6 +1272,16 @@ import { AUDIO } from './audio.js?v=20260715-1';
       }
     });
 
+    // 日本橋マップの鮮やかな青い線を除去する
+    if (/nihonbashi/i.test(url)) {
+      const kill = [];
+      wrap.traverse((o) => {
+        const c = o.isMesh && o.material && o.material.color;
+        if (c && (o.material.name === 'FFFF3232' || (c.b > 0.85 && c.r < 0.35 && c.g < 0.35))) kill.push(o);
+      });
+      for (const o of kill) if (o.parent) o.parent.remove(o);
+    }
+
     const fin = new THREE.Box3().setFromObject(wrap);
     BOUND_X_MIN = fin.min.x - 5;
     BOUND_X_MAX = fin.max.x + 5;
@@ -1465,7 +1475,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
     placeOnLoop(driftLoopPts, (cpuMeshes[13] || cpuMeshes[0] || playerCarMesh).clone(), 0.0, 8, false);
     placeOnLoop(driftLoopPts, (cpuMeshes[22] || cpuMeshes[1] || playerCarMesh).clone(), 0.5, 7, false);
 
-    // 架空マップのデモ場所は、街・外周・森林・峠から毎回ランダム。
+    // ワンダーランドのデモ場所は、街・外周・森林・峠から毎回ランダム。
     // 同じコースが選ばれても開始地点をずらす。
     const demoCandidates = [...loopDefs, driftLoopPts].filter((route) => route && route.length >= 2);
     const pickedDemoRoute = demoCandidates[Math.floor(Math.random() * demoCandidates.length)];
