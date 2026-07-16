@@ -48,6 +48,13 @@ import { AUDIO } from './audio.js?v=20260715-1';
   let startGame = function () {};   // init 内で本体を差し込む
   let gameSpawn = null;             // デモ解除時に戻る通常スポーン {x,y?,z,heading}
 
+  // 緊急指令(ミッション)の状態。ワンダーランドのみ。init 内で有効化する。
+  let missionScenarios = [];        // [{ car:'nissan180sx3.vox', msg:'...' }]
+  let missionCpuCars = [];          // 読み込み済み CPU 車 [{url, mesh}]
+  let missionRingWps = null;        // 犯人が回遊する外周ルート
+  let missionEnabled = false;
+  const mission = { phase: 'off', queue: [], active: null, nextAt: 0 };  // off/waiting/active/done
+
   // ------------------------------------------------------------- input ----
   const keys = {};
   let shiftUp = false, shiftDown = false;
@@ -1465,6 +1472,12 @@ import { AUDIO } from './audio.js?v=20260715-1';
     placeOnLoop(driftLoopPts, (cpuMeshes[13] || cpuMeshes[0] || playerCarMesh).clone(), 0.0, 8, false);
     placeOnLoop(driftLoopPts, (cpuMeshes[22] || cpuMeshes[1] || playerCarMesh).clone(), 0.5, 7, false);
 
+    // 緊急指令(ミッション)を有効化。犯人車両は外周環状(loopDefs[4])を高速回遊。
+    missionCpuCars = cpuCars;
+    missionRingWps = loopDefs[4];
+    missionScenarios = await loadScenarios();
+    missionEnabled = missionScenarios.length > 0 && missionCpuCars.length > 0;
+
     // ワンダーランドのデモ場所は、街・外周・森林・峠から毎回ランダム。
     // 同じコースが選ばれても開始地点をずらす。
     const demoCandidates = [...loopDefs, driftLoopPts].filter((route) => route && route.length >= 2);
@@ -1478,7 +1491,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
     player.heading = Math.atan2(dn.x - ds.x, dn.z - ds.z);
     enterDemo(randomDemoRoute);
     document.getElementById('loading').remove();
-    window.__voxDrive = { player, aiCars, start: () => startGame(), inDemo: () => demoActive };
+    window.__voxDrive = { player, aiCars, start: () => startGame(), inDemo: () => demoActive, mission };
     requestAnimationFrame(tick);
   }
 
@@ -1512,6 +1525,17 @@ import { AUDIO } from './audio.js?v=20260715-1';
       player.heading = gameSpawn.heading;
     }
     cam.yaw = 0; cam.pitch = 0.34; cam.dist = 10; cam.lastDrag = 0;
+
+    // 緊急指令の開始: プレイ開始1分後に1件目、以降は解決の1分後に次の1件。
+    if (missionEnabled && mission.phase === 'off') {
+      mission.queue = missionScenarios.map((_, i) => i);
+      for (let i = mission.queue.length - 1; i > 0; i--) {   // シャッフル
+        const j = Math.floor(Math.random() * (i + 1));
+        [mission.queue[i], mission.queue[j]] = [mission.queue[j], mission.queue[i]];
+      }
+      mission.phase = 'waiting';
+      mission.nextAt = performance.now() + 60000;
+    }
   };
 
   // ルートを追い、コーナーでは積極的にサイドブレーキでドリフトする自動運転。
@@ -1529,6 +1553,115 @@ import { AUDIO } from './audio.js?v=20260715-1';
       handbrake: Math.abs(diff) > 0.35 && speed > 7,   // コーナーでドリフト
       steer: clamp(diff * 1.6, -1, 1),
     };
+  }
+
+  // ------------------------------------------------------------ mission ---
+  const missionPopupEl = document.getElementById('mission-popup');
+  const missionObjEl = document.getElementById('mission-obj');
+  let missionPopupTimer = 0;
+
+  // ゲームシナリオ.txt を読む。失敗しても既定の5件で動くようにする。
+  function parseScenarios(text) {
+    const out = [];
+    let car = null;
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const mCar = line.match(/^車両[:：]\s*(.+)$/);
+      const mMsg = line.match(/^指令[:：]\s*(.+)$/);
+      if (mCar) car = mCar[1].trim();
+      else if (mMsg && car) { out.push({ car, msg: mMsg[1].trim() }); car = null; }
+    }
+    return out;
+  }
+  async function loadScenarios() {
+    try {
+      const res = await fetch(encodeURIComponent('ゲームシナリオ') + '.txt', { cache: 'no-store' });
+      if (res.ok) {
+        const sc = parseScenarios(await res.text());
+        if (sc.length) return sc;
+      }
+    } catch (_) { /* フォールバックへ */ }
+    return [
+      { car: 'nissan180sx3.vox', msg: '本部より緊急指令!管内で銀行強盗が発生した。逃亡中の白い日産180SXを追跡、確保せよ。' },
+      { car: 'keitora03.vox', msg: '本部より緊急指令!管内で銅線ケーブルの盗難が発生した。逃亡している緑の軽トラを追跡、確保せよ。' },
+      { car: 'nissan180sx2.vox', msg: '本部より緊急指令!管内で宝石店強盗が発生した。逃走中の赤い日産180SXを追跡、確保せよ。' },
+      { car: 'nissan2.vox', msg: '本部より緊急指令!管内でひったくりが多発している。逃走中の青い日産セダンを追跡、確保せよ。' },
+      { car: 'nissan3.vox', msg: '本部より緊急指令!管内で車上荒らしが発生した。逃走中の黄色い日産セダンを追跡、確保せよ。' },
+    ];
+  }
+
+  function missionPopup(text, kind) {
+    missionPopupEl.className = kind === 'caught' ? 'caught' : 'command';
+    const head = kind === 'caught' ? 'CASE CLOSED' : '緊急指令 / EMERGENCY';
+    missionPopupEl.innerHTML = '<span class="head"></span>';
+    missionPopupEl.firstChild.textContent = head;
+    missionPopupEl.appendChild(document.createTextNode(text));
+    missionPopupEl.classList.add('show');
+    clearTimeout(missionPopupTimer);
+    missionPopupTimer = setTimeout(() => missionPopupEl.classList.remove('show'), kind === 'caught' ? 2800 : 6500);
+  }
+  function missionObjective(text) {
+    if (text) { missionObjEl.textContent = '🚨 追跡中: ' + text; missionObjEl.classList.add('show'); }
+    else missionObjEl.classList.remove('show');
+  }
+  function missionTargetLabel(msg) {
+    const m = msg.match(/(?:逃亡中の|逃走中の|逃亡している)(.+?)を(?:追跡|確保)/);
+    return m ? m[1] : '犯人車両';
+  }
+  function missionFindMesh(carFile) {
+    const enc = encodeURIComponent(carFile);
+    const hit = missionCpuCars.find((c) => c.url.endsWith(enc) || c.url.endsWith('/' + carFile));
+    return (hit || missionCpuCars[0] || {}).mesh || null;
+  }
+
+  function missionIssue() {
+    const idx = mission.queue.shift();
+    const sc = missionScenarios[idx];
+    const mesh = missionFindMesh(sc.car);
+    if (!mesh || !missionRingWps) {              // 車両が無ければスキップして次へ
+      mission.phase = mission.queue.length ? 'waiting' : 'done';
+      mission.nextAt = performance.now() + 60000;
+      return;
+    }
+    const wps = missionRingWps;
+    const s = Math.floor(Math.random() * wps.length);
+    const a = wps[s], b = wps[(s + 1) % wps.length];
+    const g = makeCarGroup(mesh.clone(), false, false);
+    const crim = {
+      group: g.group, tilt: g.tilt,
+      pos: new THREE.Vector3(a.x, 0, a.z),
+      heading: Math.atan2(b.x - a.x, b.z - a.z), v: 0, base: 32,   // 32 m/s ≒ 115 km/h
+      wps, idx: (s + 1) % wps.length, radius: carRadiusFor(false), criminal: true,
+    };
+    aiCars.push(crim);
+    mission.active = crim;
+    mission.phase = 'active';
+    missionPopup(sc.msg, 'command');
+    missionObjective(missionTargetLabel(sc.msg));
+  }
+  function missionCapture() {
+    const c = mission.active;
+    if (c) {
+      scene.remove(c.group);
+      const i = aiCars.indexOf(c);
+      if (i >= 0) aiCars.splice(i, 1);
+    }
+    mission.active = null;
+    missionPopup('犯人確保!', 'caught');
+    missionObjective('');
+    if (mission.queue.length) { mission.phase = 'waiting'; mission.nextAt = performance.now() + 60000; }
+    else mission.phase = 'done';
+  }
+  function updateMission() {
+    if (!missionEnabled || demoActive) return;
+    if (mission.phase === 'waiting' && performance.now() >= mission.nextAt) missionIssue();
+    else if (mission.phase === 'active' && mission.active) {
+      const c = mission.active;
+      const dx = player.pos.x - c.pos.x, dz = player.pos.z - c.pos.z;
+      const reach = player.radius + c.radius + 1.2;   // 体当たりで確保
+      if (dx * dx + dz * dz < reach * reach) missionCapture();
+    }
   }
 
   // ------------------------------------------------------------- update ---
@@ -1688,18 +1821,25 @@ import { AUDIO } from './audio.js?v=20260715-1';
       let diff = Math.atan2(dx, dz) - ai.heading;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
-      ai.heading += clamp(diff, -1.7 * dt, 1.7 * dt);
+      const turn = ai.criminal ? 2.2 : 1.7;   // 犯人はキビキビ曲がる
+      ai.heading += clamp(diff, -turn * dt, turn * dt);
 
-      // slow down for corners
-      let target = ai.base * (1 - 0.72 * Math.min(1, Math.abs(diff) * 1.4));
-      // obey the signals: brake to a halt at the stop line on red/yellow
-      const stop = aiStopDistance(ai, sigStates);
-      let rate = 1.6;
-      if (stop < 22) {
-        target = Math.min(target, Math.max(0, (stop - 1.5) * 0.7));
-        rate = 3.5;
+      // slow down for corners(犯人は減速控えめ)
+      let target = ai.base * (1 - (ai.criminal ? 0.45 : 0.72) * Math.min(1, Math.abs(diff) * 1.4));
+      if (ai.criminal) {
+        // 逃走車は信号無視。加速はユーザー車の約1.5倍(≈18 m/s^2)に制限。
+        const dv = target - ai.v;
+        ai.v += clamp(dv, -40 * dt, 18 * dt);
+      } else {
+        // obey the signals: brake to a halt at the stop line on red/yellow
+        const stop = aiStopDistance(ai, sigStates);
+        let rate = 1.6;
+        if (stop < 22) {
+          target = Math.min(target, Math.max(0, (stop - 1.5) * 0.7));
+          rate = 3.5;
+        }
+        ai.v += (target - ai.v) * Math.min(1, dt * rate);
       }
-      ai.v += (target - ai.v) * Math.min(1, dt * rate);
       ai.pos.x += Math.sin(ai.heading) * ai.v * dt;
       ai.pos.z += Math.cos(ai.heading) * ai.v * dt;
       if (mapRoot) {
@@ -1764,6 +1904,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
     const sigStates = updateSignals(now / 1000);
     updatePlayer(dt);
     updateAI(dt, sigStates);
+    updateMission();
     updateFx(dt);
     updateCamera(dt);
     renderer.render(scene, camera);
