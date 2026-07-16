@@ -1272,16 +1272,6 @@ import { AUDIO } from './audio.js?v=20260715-1';
       }
     });
 
-    // 日本橋マップの鮮やかな青い線を除去する
-    if (/nihonbashi/i.test(url)) {
-      const kill = [];
-      wrap.traverse((o) => {
-        const c = o.isMesh && o.material && o.material.color;
-        if (c && (o.material.name === 'FFFF3232' || (c.b > 0.85 && c.r < 0.35 && c.g < 0.35))) kill.push(o);
-      });
-      for (const o of kill) if (o.parent) o.parent.remove(o);
-    }
-
     const fin = new THREE.Box3().setFromObject(wrap);
     BOUND_X_MIN = fin.min.x - 5;
     BOUND_X_MAX = fin.max.x + 5;
