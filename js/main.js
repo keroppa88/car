@@ -1641,7 +1641,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
     const crim = {
       group: g.group, tilt: g.tilt,
       pos: new THREE.Vector3(a.x, 0, a.z),
-      heading: Math.atan2(b.x - a.x, b.z - a.z), v: 0, base: 32,   // 32 m/s ≒ 115 km/h
+      heading: Math.atan2(b.x - a.x, b.z - a.z), v: 0, base: 30,   // 30 m/s = 108 km/h
       wps, idx: (s + 1) % wps.length, radius: carRadiusFor(bike), criminal: true,
     };
     aiCars.push(crim);
