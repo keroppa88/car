@@ -51,6 +51,7 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
   let gameSpawn = null;             // デモ解除時に戻る通常スポーン {x,y?,z,heading}
   let topView = false;               // 全マップ共通の真上からの全体表示
   let topViewFrame = null;           // 現在のマップ外形（遅延計算）
+  let savedFog;                      // 地図表示中に退避するフォグ
 
   // 緊急指令(ミッション)の状態。ワンダーランドのみ。init 内で有効化する。
   let missionScenarios = [];        // [{ car:'nissan180sx3.vox', msg:'...' }]
@@ -70,6 +71,10 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
     if (!e.repeat && k.toLowerCase() === 'm') {
       topView = !topView;
       topViewFrame = null;
+      // 真上からだと地表はフォグ(130〜480m)の外で全て空色になるため、地図表示中は
+      // フォグを外し、戻すときに復元する。
+      if (topView) { savedFog = scene.fog; scene.fog = null; }
+      else { scene.fog = savedFog; }
       document.body.classList.toggle('top-view', topView);
       e.preventDefault();
       return;
@@ -1630,10 +1635,10 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
     missionRoutes = [loopDefs[0], loopDefs[2], loopDefs[3], loopDefs[4], loopDefs[5]]
       .filter((r) => r && r.length >= 2);
     missionEnabled = missionScenarios.length > 0 && missionCpuCars.length > 0;
-    const scenarioFiles = new Set(missionScenarios.map((s) => s.car.toLowerCase()));
-    const trafficCars = cpuCars.filter(
-      (c) => !scenarioFiles.has(decodeURIComponent(c.url.split('/').pop()).toLowerCase())
-    );
+    // 犯人と同じ「車種」(色違い含むベースモデル)は一般CPU車から一切除外する。
+    // 例: 犯人が nissan180sx3(白の180SX)なら nissan180sx0/1/2 も出さない。
+    const scenarioModels = new Set(missionScenarios.map((s) => voxBaseModel(s.car)));
+    const trafficCars = cpuCars.filter((c) => !scenarioModels.has(voxBaseModel(c.url)));
     const trafficMeshes = trafficCars.map((c) => c.mesh);
 
     // CPU 車をグリッドの5コースへ散らす(デモは別コースなので全ループを使う)
