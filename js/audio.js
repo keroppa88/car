@@ -1,11 +1,14 @@
 /*
  * Procedural car audio built on the Web Audio API — no sound files.
  *
- * Engine: two detuned sawtooth oscillators + a sub-octave square through a
- * lowpass filter, plus band-limited combustion noise. Each gear has its own
- * frequency band; the pitch climbs
- * through the band as the revs rise. The 5th gear intentionally reuses
- * the 4th-gear band so cruising never becomes excessively high-pitched.
+ * Engine: two detuned oscillators using a custom combustion-pulse waveform
+ * (rich harmonics) + a sub-octave square, run through a throttle/rev-driven
+ * lowpass and two FIXED formant resonances that give the engine a constant
+ * "voice" (they don't slide with pitch). RPM-dependent lumpiness makes idle
+ * chuggy and high revs smooth, plus band-limited combustion noise. Each gear
+ * has its own frequency band; the pitch climbs through the band as the revs
+ * rise. The 5th gear intentionally reuses the 4th-gear band so cruising never
+ * becomes excessively high-pitched.
  *
  * Tyre screech: looped white noise through two parallel bandpass filters
  * with an LFO wobble — used both for drifting and for hard braking.
@@ -49,26 +52,47 @@ function audioModule() {
     // ----- engine -----
     engGain = ctx.createGain();
     engGain.gain.value = 0;
-    filt = ctx.createBiquadFilter();
+
+    // 燃焼パルス列に近いリッチな倍音の波形(単純なのこぎりより自然な唸り)。
+    const N = 30, wr = new Float32Array(N), wi = new Float32Array(N);
+    for (let n = 1; n < N; n++) {
+      let a = 1 / n;
+      if (n > 6) a *= Math.pow(0.82, n - 6);   // 高次倍音はさらに減衰
+      if (n % 2 === 1) a *= 1.12;               // 奇数倍音をやや強調(荒々しさ)
+      wi[n] = a;
+    }
+    const engWave = ctx.createPeriodicWave(wr, wi);
+
+    filt = ctx.createBiquadFilter();            // スロットル/回転で開く明るさ制御
     filt.type = 'lowpass';
-    filt.frequency.value = 400;
-    filt.Q.value = 1.5;
+    filt.frequency.value = 500;
+    filt.Q.value = 0.8;
+
+    // 固定フォルマント(回転で動かない共鳴)= エンジン固有の「声色」。
+    const formant1 = ctx.createBiquadFilter();
+    formant1.type = 'peaking';
+    formant1.frequency.value = 480; formant1.Q.value = 1.4; formant1.gain.value = 6;
+    const formant2 = ctx.createBiquadFilter();
+    formant2.type = 'peaking';
+    formant2.frequency.value = 1300; formant2.Q.value = 1.1; formant2.gain.value = 4.5;
 
     osc1 = ctx.createOscillator();
-    osc1.type = 'sawtooth';
+    osc1.setPeriodicWave(engWave);
     osc2 = ctx.createOscillator();
-    osc2.type = 'sawtooth';
-    osc2.detune.value = 16;              // slight detune = engine roughness
+    osc2.setPeriodicWave(engWave);
+    osc2.detune.value = 11;              // slight detune = engine roughness
     oscSub = ctx.createOscillator();
     oscSub.type = 'square';
     const subGain = ctx.createGain();
-    subGain.gain.value = 0.45;
+    subGain.gain.value = 0.4;
 
     osc1.connect(filt);
     osc2.connect(filt);
     oscSub.connect(subGain);
     subGain.connect(filt);
-    filt.connect(engGain);
+    filt.connect(formant1);
+    formant1.connect(formant2);
+    formant2.connect(engGain);
     engGain.connect(master);
     osc1.start(); osc2.start(); oscSub.start();
 
@@ -155,33 +179,32 @@ function audioModule() {
 
     const freq = f[0] + (f[1] - f[0]) * rpmSmooth;
 
-    // gear index: R=0, N=1, 1速=2 ... 4速=5, 5速=6。
-    // 高速ギアだけ回転ムラを足し、音程を上げずに振動感を強くする。
-    const roughness = s.gear === 5 ? 0.7 : (s.gear === 6 ? 1.0 : 0);
-    roughPhase += dt * (35 + rpmSmooth * 45);
-    const wobble = roughness * (
-      Math.sin(roughPhase) * 0.018 +
-      Math.sin(roughPhase * 0.47 + 0.9) * 0.009
+    // 燃焼のムラ(ドコドコ感)は全ギア共通。アイドル(低回転)ほど脈動が強く、
+    // 高回転ほど滑らかな唸りになる。エンジンらしさの肝。
+    const rough = 0.3 + 0.55 * (1 - rpmSmooth);
+    roughPhase += dt * (16 + rpmSmooth * 42);   // 約2.5Hz(アイドル)〜9Hz(高回転)
+    const wobble = rough * (
+      Math.sin(roughPhase) * 0.012 +
+      Math.sin(roughPhase * 0.37 + 0.9) * 0.006
     );
     const roughFreq = freq * (1 + wobble);
-    const pitchResponse = roughness ? 0.012 : 0.04;
-    osc1.frequency.setTargetAtTime(roughFreq, t, pitchResponse);
-    osc2.frequency.setTargetAtTime(roughFreq * (1 - wobble * 0.35), t, pitchResponse);
-    oscSub.frequency.setTargetAtTime(roughFreq / 2, t, pitchResponse);
-    filt.frequency.setTargetAtTime(250 + roughFreq * 3.5, t, 0.05);
+    osc1.frequency.setTargetAtTime(roughFreq, t, 0.02);
+    osc2.frequency.setTargetAtTime(roughFreq * (1 - wobble * 0.4), t, 0.02);
+    oscSub.frequency.setTargetAtTime(roughFreq / 2, t, 0.02);
 
-    const vol = 0.05 + 0.09 * rpmSmooth + (s.throttle ? 0.05 : 0);
-    const pulse = 1 + roughness * (
-      Math.sin(roughPhase) * 0.10 + Math.sin(roughPhase * 0.5) * 0.05
-    );
-    engGain.gain.setTargetAtTime(Math.max(0, vol * pulse), t, roughness ? 0.025 : 0.08);
+    // 明るさ(倍音)はスロットルと回転で開く: 踏むと硬く鋭く、離すと丸く。
+    const bright = 320 + roughFreq * 4 + rpmSmooth * 900 + (s.throttle ? 1500 : 0);
+    filt.frequency.setTargetAtTime(bright, t, 0.04);
 
-    // 4速で控えめ、5速でさらに多い燃焼ノイズを混ぜる。
-    const engineNoise = roughness * (
-      0.012 + rpmSmooth * 0.025 + (s.throttle ? 0.015 : 0)
-    );
+    // 音量に脈動(ドコドコ)を乗せる。
+    const vol = 0.05 + 0.10 * rpmSmooth + (s.throttle ? 0.05 : 0);
+    const pulse = 1 + rough * (Math.sin(roughPhase) * 0.13 + Math.sin(roughPhase * 0.5) * 0.06);
+    engGain.gain.setTargetAtTime(Math.max(0, vol * pulse), t, 0.03);
+
+    // 燃焼ノイズ(全ギア。踏むと増え、回転で明るくなる)。
+    const engineNoise = 0.006 + rpmSmooth * 0.02 + (s.throttle ? 0.018 : 0.004);
     engNoiseGain.gain.setTargetAtTime(engineNoise, t, 0.035);
-    engNoiseFilter.frequency.setTargetAtTime(140 + roughFreq * 1.5, t, 0.05);
+    engNoiseFilter.frequency.setTargetAtTime(200 + roughFreq * 2, t, 0.05);
 
     // screech: whichever is stronger — drifting or locked-up braking
     const drift = s.drifting ? Math.min(1, Math.max(0, s.slip - 1.5) / 5) : 0;
