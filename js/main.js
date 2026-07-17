@@ -133,6 +133,35 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
   scene.background = new THREE.Color(SKY);
   scene.fog = new THREE.Fog(SKY, 130, 480);
 
+  // Mキーの全体地図で使う現在位置マーカー。鈴鹿は道路幅10.584mに対して
+  // 直径14m、その他は最大14mの市街道路より少し大きい直径16mにする。
+  const MAP_MARKER_DIAMETER = SUZUKA_MODE ? 14 : 16;
+  function makeMapMarker(fillColor) {
+    const group = new THREE.Group();
+    const fill = new THREE.Mesh(
+      new THREE.CircleGeometry(MAP_MARKER_DIAMETER * 0.5, 48),
+      new THREE.MeshBasicMaterial({
+        color: fillColor, transparent: true, opacity: 0.88,
+        depthTest: false, depthWrite: false, toneMapped: false, fog: false,
+      })
+    );
+    const outline = new THREE.Mesh(
+      new THREE.RingGeometry(MAP_MARKER_DIAMETER * 0.48, MAP_MARKER_DIAMETER * 0.58, 48),
+      new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.98,
+        depthTest: false, depthWrite: false, toneMapped: false, fog: false,
+      })
+    );
+    fill.rotation.x = outline.rotation.x = -Math.PI / 2;
+    fill.renderOrder = outline.renderOrder = 1000;
+    group.add(fill, outline);
+    group.visible = false;
+    scene.add(group);
+    return group;
+  }
+  const playerMapMarker = makeMapMarker(0x00d9ff);
+  const criminalMapMarker = makeMapMarker(0xff2020);
+
   // near=0.5 keeps enough depth precision at 300 m for the thin road layers
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.5, 1200);
 
@@ -2039,6 +2068,8 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
         camera.far = height * 1.5;
         camera.updateProjectionMatrix();
       }
+      if (scene.fog) scene.fog.far = Math.max(SUZUKA_MODE ? 1800 : 480, height * 4);
+      sun.castShadow = false;
       camera.up.set(0, 0, -1);
       camera.position.set(center.x, center.y + height, center.z);
       camera.lookAt(center);
@@ -2046,6 +2077,8 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
       sun.target.position.copy(center);
       return;
     }
+    if (scene.fog) scene.fog.far = SUZUKA_MODE ? 1800 : 480;
+    sun.castShadow = true;
     camera.up.set(0, 1, 0);
     if (demoActive) {
       // 20秒に1度、5秒ほどランダムな視点に切り替える
@@ -2086,6 +2119,23 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
     sun.target.position.copy(player.pos);
   }
 
+  function updateMapMarkers() {
+    playerMapMarker.visible = topView;
+    if (topView) playerMapMarker.position.set(player.pos.x, player.pos.y + 8, player.pos.z);
+
+    const showCriminal = topView && !MAP_GLTF && !!mission.active;
+    criminalMapMarker.visible = showCriminal;
+    if (showCriminal) {
+      criminalMapMarker.position.set(
+        mission.active.pos.x,
+        mission.active.pos.y + 8,
+        mission.active.pos.z
+      );
+    }
+    document.body.dataset.playerMapMarkerVisible = String(playerMapMarker.visible);
+    document.body.dataset.criminalMapMarkerVisible = String(criminalMapMarker.visible);
+  }
+
   // --------------------------------------------------------------- loop ---
   let last = performance.now();
   function tick(now) {
@@ -2096,6 +2146,7 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
     updateAI(dt, sigStates);
     updateMission();
     updateFx(dt);
+    updateMapMarkers();
     updateCamera(dt);
     renderer.render(scene, camera);
     requestAnimationFrame(tick);
