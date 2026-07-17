@@ -55,7 +55,8 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
   // 緊急指令(ミッション)の状態。ワンダーランドのみ。init 内で有効化する。
   let missionScenarios = [];        // [{ car:'nissan180sx3.vox', msg:'...' }]
   let missionCpuCars = [];          // 読み込み済み CPU 車 [{url, mesh}]
-  let missionRingWps = null;        // 犯人が回遊する外周ルート
+  let missionRingWps = null;        // 犯人ルートのフォールバック
+  let missionRoutes = null;         // 犯人が走る候補コース群(毎回ランダムに選ぶ)
   let missionEnabled = false;
   let missionHit = false;           // このフレームで犯人車に接触したか
   const mission = { phase: 'off', queue: [], active: null, nextAt: 0 };  // off/waiting/active/done
@@ -1057,6 +1058,43 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
     return /^kabu\d*\.vox$/i.test(file);
   }
 
+  // 車種の基本名(末尾の数字=色違いを除く)。例 keitora03->keitora, nissan180sx2->nissan180sx
+  function voxBaseModel(url) {
+    const file = decodeURIComponent(String(url).split('?')[0].split('/').pop() || '').replace(/\.vox$/i, '');
+    return file.replace(/\d+$/, '').toLowerCase();
+  }
+  const shuffleArray = (arr) => {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  };
+  // 車種ごとに最大 perModel 台・合計 total 台まで、なるべく多様に選ぶ。Kabu は kabuMax 台まで。
+  function pickDiverseCpuVox(urls, perModel, total, kabuMax) {
+    const byModel = new Map();
+    for (const url of urls) {
+      const key = voxBaseModel(url);
+      if (!byModel.has(key)) byModel.set(key, []);
+      byModel.get(key).push(url);
+    }
+    for (const list of byModel.values()) shuffleArray(list);   // 色違いをランダムに
+    const models = shuffleArray([...byModel.keys()]);          // 車種の順もランダムに
+    const picked = [];
+    let kabu = 0;
+    for (let round = 0; round < perModel; round++) {
+      for (const m of models) {
+        const list = byModel.get(m);
+        if (round >= list.length) continue;
+        const url = list[round];
+        if (isKabuVoxUrl(url)) { if (kabu >= kabuMax) continue; kabu++; }
+        picked.push(url);
+        if (picked.length >= total) return picked;
+      }
+    }
+    return picked;
+  }
+
   async function githubVoxFiles() {
     if (!location.hostname.endsWith('.github.io')) return [];
     const owner = location.hostname.slice(0, -'.github.io'.length);
@@ -1319,12 +1357,9 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
     ]);
     // 日本橋ではCPU車を配置しないため、車種検索とVOX読み込みも省略する。
     const discoveredCpuVox = NIHONBASHI_MODE ? [] : await discoverCpuCarVox();
-    const suzukaCpuVox = SUZUKA_MODE
-      ? [
-          ...discoveredCpuVox.filter((url) => !isKabuVoxUrl(url)).slice(0, 9),
-          ...discoveredCpuVox.filter(isKabuVoxUrl).slice(0, 1),
-        ]
-      : [];
+    // 鈴鹿は車種ごと最大2台の多様な10台(Kabuは1台)を選ぶ。
+    // sort 済み先頭9台だと keitora/nissan の色違いばかりになってしまうため。
+    const suzukaCpuVox = SUZUKA_MODE ? pickDiverseCpuVox(discoveredCpuVox, 2, 10, 1) : [];
     const cpuCars = await loadCpuCars(
       NIHONBASHI_MODE ? [] : (SUZUKA_MODE ? suzukaCpuVox : (MAP_GLTF ? discoveredCpuVox.slice(0, 4) : discoveredCpuVox))
     );
@@ -1423,11 +1458,12 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
         const suzukaRoadCars = cpuCars.filter((car) => !isKabuVoxUrl(car.url));
         const suzukaKabu = cpuCars.find((car) => isKabuVoxUrl(car.url));
         if (wps.length >= 2 && (suzukaRoadCars.length || suzukaKabu)) {
+          let roadIdx = 0;   // road 車を順番に使い切る(Kabu枠で番号が飛ばないように)
           suzukaSpeedsKmh.forEach((speedKmh, i) => {
             const useKabu = !!suzukaKabu && i === 5;
             const vehicle = useKabu
               ? suzukaKabu
-              : suzukaRoadCars[i % suzukaRoadCars.length];
+              : suzukaRoadCars[roadIdx++ % suzukaRoadCars.length];
             if (!vehicle) return;
             const start = Math.floor(i * wps.length / suzukaSpeedsKmh.length);
             const next = (start + 1) % wps.length;
@@ -1588,7 +1624,11 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
     // (見た目が同じ車が複数走ると、どれが犯人か分からなくなるため)。
     missionScenarios = await loadScenarios();
     missionCpuCars = cpuCars;             // 犯人メッシュ参照用に全車種を保持
-    missionRingWps = loopDefs[4];         // 犯人が高速回遊する外周環状
+    missionRingWps = loopDefs[4];         // 外周環状(フォールバック)
+    // 犯人は毎回いろいろなコースを走る: 外周・大ブロック区画・環状・森林(小さすぎる
+    // 1ブロックの loopDefs[1] は除外)。
+    missionRoutes = [loopDefs[0], loopDefs[2], loopDefs[3], loopDefs[4], loopDefs[5]]
+      .filter((r) => r && r.length >= 2);
     missionEnabled = missionScenarios.length > 0 && missionCpuCars.length > 0;
     const scenarioFiles = new Set(missionScenarios.map((s) => s.car.toLowerCase()));
     const trafficCars = cpuCars.filter(
@@ -1770,12 +1810,14 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
     const idx = mission.queue.shift();
     const sc = missionScenarios[idx];
     const mesh = missionFindMesh(sc.car);
-    if (!mesh || !missionRingWps) {              // 車両が無ければスキップして次へ
+    const routes = (missionRoutes && missionRoutes.length) ? missionRoutes
+      : (missionRingWps ? [missionRingWps] : null);
+    if (!mesh || !routes) {                      // 車両/コースが無ければスキップして次へ
       mission.phase = mission.queue.length ? 'waiting' : 'done';
       mission.nextAt = performance.now() + 60000;
       return;
     }
-    const wps = missionRingWps;
+    const wps = routes[Math.floor(Math.random() * routes.length)];   // 毎回ランダムなコース
     const s = Math.floor(Math.random() * wps.length);
     const a = wps[s], b = wps[(s + 1) % wps.length];
     const bike = /(^|\/)kabu\d*\.vox$/i.test(sc.car);   // カブはバイク: 影・当たりを小さく
