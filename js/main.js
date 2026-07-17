@@ -1041,7 +1041,7 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
   ]);
   const FALLBACK_CPU_VOX_FILES = [
     'nissan0.vox', 'nissan1.vox', 'volvo.vox', 'toyotaprobox.vox',
-    'keitora.vox', 'vw01.vox', 'nissan180sx0.vox', 'toyotahigh00.vox',
+    'keitora.vox', 'vw01.vox', 'nissan180sx0.vox', 'toyotahigh00.vox', 'kabu.vox',
   ];
 
   function cpuVoxUrls(fileNames) {
@@ -1050,6 +1050,11 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
       .filter((name) => /\.vox$/i.test(name) && !RESERVED_VOX_FILES.has(name.toLowerCase()))
       .sort((a, b) => a.localeCompare(b, 'en'))
       .map((name) => 'vox/' + encodeURIComponent(name));
+  }
+
+  function isKabuVoxUrl(url) {
+    const file = decodeURIComponent(String(url).split('?')[0].split('/').pop() || '');
+    return /^kabu\d*\.vox$/i.test(file);
   }
 
   async function githubVoxFiles() {
@@ -1314,8 +1319,14 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
     ]);
     // 日本橋ではCPU車を配置しないため、車種検索とVOX読み込みも省略する。
     const discoveredCpuVox = NIHONBASHI_MODE ? [] : await discoverCpuCarVox();
+    const suzukaCpuVox = SUZUKA_MODE
+      ? [
+          ...discoveredCpuVox.filter((url) => !isKabuVoxUrl(url)).slice(0, 9),
+          ...discoveredCpuVox.filter(isKabuVoxUrl).slice(0, 1),
+        ]
+      : [];
     const cpuCars = await loadCpuCars(
-      NIHONBASHI_MODE ? [] : (MAP_GLTF ? discoveredCpuVox.slice(0, 4) : discoveredCpuVox)
+      NIHONBASHI_MODE ? [] : (SUZUKA_MODE ? suzukaCpuVox : (MAP_GLTF ? discoveredCpuVox.slice(0, 4) : discoveredCpuVox))
     );
     const cpuMeshes = cpuCars.map((car) => car.mesh);
 
@@ -1409,19 +1420,26 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
         const race = (info.loops.race || []).sort((a, b) => a.i - b.i);
         const wps = race.map((w) => ({ x: w.p.x, z: w.p.z }));
         const suzukaSpeedsKmh = [90, 92, 94, 96, 98, 100, 102, 104, 106, 110];
-        if (wps.length >= 2 && sourceMeshes.length) {
+        const suzukaRoadCars = cpuCars.filter((car) => !isKabuVoxUrl(car.url));
+        const suzukaKabu = cpuCars.find((car) => isKabuVoxUrl(car.url));
+        if (wps.length >= 2 && (suzukaRoadCars.length || suzukaKabu)) {
           suzukaSpeedsKmh.forEach((speedKmh, i) => {
+            const useKabu = !!suzukaKabu && i === 5;
+            const vehicle = useKabu
+              ? suzukaKabu
+              : suzukaRoadCars[i % suzukaRoadCars.length];
+            if (!vehicle) return;
             const start = Math.floor(i * wps.length / suzukaSpeedsKmh.length);
             const next = (start + 1) % wps.length;
             const a = wps[start], b = wps[next];
             const base = speedKmh / 3.6;
-            const g = makeCarGroup(sourceMeshes[i % sourceMeshes.length].clone());
+            const g = makeCarGroup(vehicle.mesh.clone(), false, useKabu);
             aiCars.push({
               group: g.group, tilt: g.tilt,
               pos: new THREE.Vector3(a.x, groundHeightAt(a.x, 500, a.z), a.z),
               heading: Math.atan2(b.x - a.x, b.z - a.z),
               v: base * 0.9, base,
-              wps, idx: next, radius: carRadiusFor(false),
+              wps, idx: next, radius: carRadiusFor(useKabu), kabu: useKabu,
               cornerSlowdown: 0.08,
             });
           });
@@ -1500,6 +1518,7 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
       document.body.dataset.aiSpeedMaxKmh = aiCars.length
         ? Math.max(...aiCars.map((ai) => ai.base * 3.6)).toFixed(0)
         : '0';
+      document.body.dataset.kabuCarCount = String(aiCars.filter((ai) => ai.kabu).length);
       document.body.dataset.cpuUsesPlayerCar = String(cpuCars.some((car) => {
         const file = decodeURIComponent(car.url.split('?')[0].split('/').pop() || '').toLowerCase();
         return RESERVED_VOX_FILES.has(file);
