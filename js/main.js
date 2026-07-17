@@ -51,6 +51,7 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
   let gameSpawn = null;             // デモ解除時に戻る通常スポーン {x,y?,z,heading}
   let topView = false;               // 全マップ共通の真上からの全体表示
   let topViewFrame = null;           // 現在のマップ外形（遅延計算）
+  let crimMarker = null, selfMarker = null;   // 地図表示: 犯人=赤丸 / 自車=白丸
   let savedFog;                      // 地図表示中に退避するフォグ
 
   // 緊急指令(ミッション)の状態。ワンダーランドのみ。init 内で有効化する。
@@ -2062,7 +2063,27 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
     }
   }
 
+  // 地図表示用のマーカー(平たい円。常に最前面に描く)。半径1で作り scale で拡縮。
+  function makeMapMarker(color) {
+    const m = new THREE.Mesh(
+      new THREE.CircleGeometry(1, 28),
+      new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.95,
+        depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+      })
+    );
+    m.rotation.x = -Math.PI / 2;
+    m.renderOrder = 999;
+    m.visible = false;
+    return m;
+  }
+
   function updateCamera(dt) {
+    if (!crimMarker) { crimMarker = makeMapMarker(0xff2020); scene.add(crimMarker); }
+    if (!selfMarker) { selfMarker = makeMapMarker(0xffffff); scene.add(selfMarker); }
+    crimMarker.visible = false;
+    selfMarker.visible = false;
+
     if (topView) {
       if (!topViewFrame) {
         if (mapRoot) {
@@ -2091,6 +2112,17 @@ import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
       camera.lookAt(center);
       sun.position.copy(center).addScaledVector(SUN_DIR, 120);
       sun.target.position.copy(center);
+
+      // 自車=白丸・犯人=赤丸。表示スケールは画面に対して一定の割合にする。
+      const mScale = Math.max(6, span * 0.018);
+      selfMarker.position.set(player.pos.x, 60, player.pos.z);
+      selfMarker.scale.setScalar(mScale);
+      selfMarker.visible = true;
+      if (mission.active) {
+        crimMarker.position.set(mission.active.pos.x, 60, mission.active.pos.z);
+        crimMarker.scale.setScalar(mScale);
+        crimMarker.visible = true;
+      }
       return;
     }
     camera.up.set(0, 1, 0);
