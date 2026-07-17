@@ -10,6 +10,7 @@ import { GLTFLoader } from '../lib/GLTFLoader.js';
 import { mergeGeometries } from '../lib/BufferGeometryUtils.js';
 import { VOX } from './vox.js';
 import { AUDIO } from './audio.js?v=20260715-1';
+import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
 
 (function () {
   'use strict';
@@ -20,6 +21,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
   //   ?map=city            … デフォルトと同じ自動生成マップ
   const pageQuery = new URLSearchParams(location.search);
   const mapParam = pageQuery.get('map');
+  const SUZUKA_MODE = (mapParam || '').toLowerCase() === 'suzuka';
   const carParam = (pageQuery.get('car') || 'toyota86').toLowerCase();
   const PLAYER_CAR_KEY = carParam === 'volvo240' ? 'volvo240' : 'toyota86';
   const MAP_GLTF = mapParam === null || ['', 'city', 'procedural', 'none', '0'].includes(mapParam)
@@ -47,6 +49,8 @@ import { AUDIO } from './audio.js?v=20260715-1';
   let demoActive = false;
   let startGame = function () {};   // init 内で本体を差し込む
   let gameSpawn = null;             // デモ解除時に戻る通常スポーン {x,y?,z,heading}
+  let topView = false;               // 全マップ共通の真上からの全体表示
+  let topViewFrame = null;           // 現在のマップ外形（遅延計算）
 
   // 緊急指令(ミッション)の状態。ワンダーランドのみ。init 内で有効化する。
   let missionScenarios = [];        // [{ car:'nissan180sx3.vox', msg:'...' }]
@@ -61,13 +65,20 @@ import { AUDIO } from './audio.js?v=20260715-1';
   let shiftUp = false, shiftDown = false;
   window.addEventListener('keydown', (e) => {
     AUDIO.unlock();
-    if (demoActive) { startGame(); return; }   // 何かキーでゲーム開始
     const k = e.key;
+    if (!e.repeat && k.toLowerCase() === 'm') {
+      topView = !topView;
+      topViewFrame = null;
+      document.body.classList.toggle('top-view', topView);
+      e.preventDefault();
+      return;
+    }
+    if (demoActive) { startGame(); return; }   // 何かキーでゲーム開始
     if (k.startsWith('Arrow') || k === ' ') e.preventDefault();
     if (!e.repeat) {
       if (k === 'ArrowUp') shiftUp = true;
       if (k === 'ArrowDown') shiftDown = true;
-      if (k.toLowerCase() === 'm') AUDIO.toggle();
+      if (k.toLowerCase() === 'n') AUDIO.toggle();
     }
     keys[k.toLowerCase()] = true;
   });
@@ -857,17 +868,17 @@ import { AUDIO } from './audio.js?v=20260715-1';
   }
 
   // ------------------------------------------------------------- player ---
-  // 低いギアは素早く吹け上がり、5速に入れる頃には約70km/h。そこから
-  // 6秒ほどで最高速の110km/hに達する(5速はvmax=32だが空気抵抗との
-  // 釣り合いでちょうど110km/hで頭打ちになる)。
+  // 全マップ共通のユーザー車最高速度: 180km/h (50m/s)。
+  // 5速には少し余裕を持たせ、物理更新後のハードリミッターで統一する。
+  const PLAYER_TOP_SPEED = 180 / 3.6;
   const GEARS = [
     { name: 'R', vmax: -8.3, acc: 5.5 },   // ~30 km/h reverse
     { name: 'N', vmax: 0, acc: 0 },
     { name: '1', vmax: 6.1, acc: 10.0 },  // 22 km/h
     { name: '2', vmax: 11.1, acc: 8.0 },   // 40
     { name: '3', vmax: 15.3, acc: 7.0 },   // 55
-    { name: '4', vmax: 19.4, acc: 6.0 },   // 70
-    { name: '5', vmax: 32.0, acc: 14.0 },  // 実質110 km/h(最高速度)
+    { name: '4', vmax: 27.8, acc: 7.0 },   // 100 km/h
+    { name: '5', vmax: 54.0, acc: 14.0 },  // 180 km/h limiter
   ];
 
   const player = {
@@ -1028,6 +1039,10 @@ import { AUDIO } from './audio.js?v=20260715-1';
   const RESERVED_VOX_FILES = new Set([
     PLAYER_CAR_FILE.toLowerCase(),
   ]);
+  const FALLBACK_CPU_VOX_FILES = [
+    'nissan0.vox', 'nissan1.vox', 'volvo.vox', 'toyotaprobox.vox',
+    'keitora.vox', 'vw01.vox', 'nissan180sx0.vox', 'toyotahigh00.vox',
+  ];
 
   function cpuVoxUrls(fileNames) {
     return [...new Set(fileNames)]
@@ -1086,12 +1101,16 @@ import { AUDIO } from './audio.js?v=20260715-1';
         console.warn('Could not inspect the vox folder with this source.', error);
       }
     }
-    console.warn('No CPU vehicle files were discovered. The player car will be used as a fallback.');
-    return [];
+    console.warn('No CPU vehicle listing was discovered. Using the built-in non-player CPU list.');
+    return cpuVoxUrls(FALLBACK_CPU_VOX_FILES);
   }
 
   async function loadCpuCars(urls) {
-    return (await Promise.all(urls.map(async (url) => {
+    const nonPlayerUrls = urls.filter((url) => {
+      const file = decodeURIComponent(String(url).split('?')[0].split('/').pop() || '').toLowerCase();
+      return !RESERVED_VOX_FILES.has(file);
+    });
+    return (await Promise.all(nonPlayerUrls.map(async (url) => {
       try {
         return { url, mesh: await VOX.load(url, { scale: VOXEL_SCALE }) };
       } catch (error) {
@@ -1305,7 +1324,17 @@ import { AUDIO } from './audio.js?v=20260715-1';
     player.tilt = p.tilt;
 
     if (MAP_GLTF) {
-      const info = await loadGltfMap(MAP_GLTF);
+      const info = SUZUKA_MODE ? buildSuzukaMap(scene) : await loadGltfMap(MAP_GLTF);
+      if (SUZUKA_MODE) {
+        mapRoot = info.root;
+        const fin = new THREE.Box3().setFromObject(mapRoot);
+        BOUND_X_MIN = fin.min.x - 5;
+        BOUND_X_MAX = fin.max.x + 5;
+        BOUND_Z = Math.max(Math.abs(fin.min.z), Math.abs(fin.max.z)) + 5;
+        camera.far = 2400;
+        camera.updateProjectionMatrix();
+        scene.fog.far = 1800;
+      }
       // 開始位置は「道路の上」: 中心付近を放射状にレイキャストして、
       // 一番よく出てくる高さ(=道路・地表)の中で中心に近い地点を選ぶ。
       // ビルの屋上は高さがバラバラなので最頻値には選ばれない。
@@ -1350,6 +1379,15 @@ import { AUDIO } from './audio.js?v=20260715-1';
         player.heading = 0;
       }
 
+      if (SUZUKA_MODE) {
+        gameSpawn = {
+          x: player.pos.x,
+          y: player.pos.y,
+          z: player.pos.z,
+          heading: player.heading,
+        };
+      }
+
       // 日本橋だけ: 元の開始位置から車長1台分後退し、左へ90度向ける。
       if (NIHONBASHI_MODE) {
         const originalHeading = player.heading;
@@ -1366,33 +1404,107 @@ import { AUDIO } from './audio.js?v=20260715-1';
         };
       }
 
-      const sourceMeshes = cpuMeshes.length ? cpuMeshes : [playerCarMesh];
-      const meshPool = Array.from({ length: 4 }, (_, i) => sourceMeshes[i % sourceMeshes.length].clone());
-      const customLoopNames = NIHONBASHI_MODE ? [] : Object.keys(info.loops).slice(0, 4);
-      customLoopNames.forEach((nm, i) => {
-        const wps = info.loops[nm].sort((a, b) => a.i - b.i).map((w) => ({ x: w.p.x, z: w.p.z }));
-        if (wps.length < 2) return;
-        const g = makeCarGroup(meshPool[i]);
-        aiCars.push({
-          group: g.group, tilt: g.tilt,
-          pos: new THREE.Vector3(wps[0].x, groundHeightAt(wps[0].x, 500, wps[0].z), wps[0].z),
-          heading: 0, v: 0, base: 9 + i * 1.5,
-          wps, idx: 1, radius: carRadiusFor(false),
+      const sourceMeshes = cpuMeshes;
+      if (SUZUKA_MODE) {
+        const race = (info.loops.race || []).sort((a, b) => a.i - b.i);
+        const wps = race.map((w) => ({ x: w.p.x, z: w.p.z }));
+        const suzukaSpeedsKmh = [90, 92, 94, 96, 98, 100, 102, 104, 106, 110];
+        if (wps.length >= 2 && sourceMeshes.length) {
+          suzukaSpeedsKmh.forEach((speedKmh, i) => {
+            const start = Math.floor(i * wps.length / suzukaSpeedsKmh.length);
+            const next = (start + 1) % wps.length;
+            const a = wps[start], b = wps[next];
+            const base = speedKmh / 3.6;
+            const g = makeCarGroup(sourceMeshes[i % sourceMeshes.length].clone());
+            aiCars.push({
+              group: g.group, tilt: g.tilt,
+              pos: new THREE.Vector3(a.x, groundHeightAt(a.x, 500, a.z), a.z),
+              heading: Math.atan2(b.x - a.x, b.z - a.z),
+              v: base * 0.9, base,
+              wps, idx: next, radius: carRadiusFor(false),
+              cornerSlowdown: 0.08,
+            });
+          });
+        }
+      } else {
+        const meshPool = sourceMeshes.length
+          ? Array.from({ length: 4 }, (_, i) => sourceMeshes[i % sourceMeshes.length].clone())
+          : [];
+        const customLoopNames = NIHONBASHI_MODE ? [] : Object.keys(info.loops).slice(0, 4);
+        customLoopNames.forEach((nm, i) => {
+          const wps = info.loops[nm].sort((a, b) => a.i - b.i).map((w) => ({ x: w.p.x, z: w.p.z }));
+          if (wps.length < 2) return;
+          if (!meshPool[i]) return;
+          const g = makeCarGroup(meshPool[i]);
+          aiCars.push({
+            group: g.group, tilt: g.tilt,
+            pos: new THREE.Vector3(wps[0].x, groundHeightAt(wps[0].x, 500, wps[0].z), wps[0].z),
+            heading: 0, v: 0, base: 9 + i * 1.5,
+            wps, idx: 1, radius: carRadiusFor(false),
+          });
         });
-      });
+      }
       initFx();
 
-      // デモ用のドーナツ状ルート(スポーン地点=道路の上を中心に周回ドリフト)
-      const demoDonut = [];
-      const cx = player.pos.x, cz = player.pos.z, R = 24;
-      for (let i = 0; i < 16; i++) {
-        const a = (i / 16) * Math.PI * 2;
-        demoDonut.push({ x: cx + Math.cos(a) * R, z: cz + Math.sin(a) * R });
+      const demoRoute = info.demoRoute || [];
+      if (demoRoute.length >= 2) {
+        let demoStart = SUZUKA_MODE ? Math.floor(Math.random() * demoRoute.length) : 0;
+        if (SUZUKA_MODE && aiCars.length) {
+          for (let offset = 0; offset < demoRoute.length; offset++) {
+            const candidate = (demoStart + offset) % demoRoute.length;
+            const p = demoRoute[candidate];
+            const clear = aiCars.every((ai) => Math.hypot(p.x - ai.pos.x, p.z - ai.pos.z) >= 55);
+            if (clear) { demoStart = candidate; break; }
+          }
+        }
+        const randomizedDemoRoute = demoRoute.slice(demoStart).concat(demoRoute.slice(0, demoStart));
+        player.pos.set(
+          randomizedDemoRoute[0].x,
+          groundHeightAt(randomizedDemoRoute[0].x, 500, randomizedDemoRoute[0].z),
+          randomizedDemoRoute[0].z
+        );
+        player.heading = Math.atan2(
+          randomizedDemoRoute[1].x - randomizedDemoRoute[0].x,
+          randomizedDemoRoute[1].z - randomizedDemoRoute[0].z
+        );
+        if (SUZUKA_MODE) {
+          const demoSpeed = 100 / 3.6;
+          player.vel.set(Math.sin(player.heading) * demoSpeed, 0, Math.cos(player.heading) * demoSpeed);
+          const nearestCpu = aiCars.length
+            ? Math.min(...aiCars.map((ai) => Math.hypot(player.pos.x - ai.pos.x, player.pos.z - ai.pos.z)))
+            : Infinity;
+          document.body.dataset.demoStartIndex = String(demoStart);
+          document.body.dataset.demoCpuGapM = Number.isFinite(nearestCpu) ? nearestCpu.toFixed(1) : 'none';
+        }
+        enterDemo(randomizedDemoRoute);
+      } else {
+        // External maps without a route keep the original local drift demo.
+        const demoDonut = [];
+        const cx = player.pos.x, cz = player.pos.z, R = 24;
+        for (let i = 0; i < 16; i++) {
+          const a = (i / 16) * Math.PI * 2;
+          demoDonut.push({ x: cx + Math.cos(a) * R, z: cz + Math.sin(a) * R });
+        }
+        enterDemo(demoDonut);
       }
-      enterDemo(demoDonut);
 
       document.getElementById('loading').remove();
       window.__voxDrive = { player, aiCars, start: () => startGame(), inDemo: () => demoActive };
+      document.body.dataset.aiCarCount = String(aiCars.length);
+      document.body.dataset.aiSpeedAverageKmh = aiCars.length
+        ? (aiCars.reduce((sum, ai) => sum + ai.base * 3.6, 0) / aiCars.length).toFixed(1)
+        : '0.0';
+      document.body.dataset.aiSpeedMinKmh = aiCars.length
+        ? Math.min(...aiCars.map((ai) => ai.base * 3.6)).toFixed(0)
+        : '0';
+      document.body.dataset.aiSpeedMaxKmh = aiCars.length
+        ? Math.max(...aiCars.map((ai) => ai.base * 3.6)).toFixed(0)
+        : '0';
+      document.body.dataset.cpuUsesPlayerCar = String(cpuCars.some((car) => {
+        const file = decodeURIComponent(car.url.split('?')[0].split('/').pop() || '').toLowerCase();
+        return RESERVED_VOX_FILES.has(file);
+      }));
+      document.body.dataset.playerTopSpeedKmh = '180';
       requestAnimationFrame(tick);
       return;
     }
@@ -1482,8 +1594,10 @@ import { AUDIO } from './audio.js?v=20260715-1';
 
     // ドリフトコースにも CPU 車を2台流す(グリッドの車を奪わないよう clone)
     // CPU アセットが少ない場合も、初期ロード済みの車を代替に使う。
-    placeOnLoop(driftLoopPts, (trafficMeshes[13] || trafficMeshes[0] || playerCarMesh).clone(), 0.0, 8, false);
-    placeOnLoop(driftLoopPts, (trafficMeshes[22] || trafficMeshes[1] || playerCarMesh).clone(), 0.5, 7, false);
+    const driftCpuA = trafficMeshes[13] || trafficMeshes[0] || cpuMeshes[0];
+    const driftCpuB = trafficMeshes[22] || trafficMeshes[1] || cpuMeshes[1] || cpuMeshes[0];
+    if (driftCpuA) placeOnLoop(driftLoopPts, driftCpuA.clone(), 0.0, 8, false);
+    if (driftCpuB) placeOnLoop(driftLoopPts, driftCpuB.clone(), 0.5, 7, false);
 
     // ワンダーランドのデモ場所は、街・外周・森林・峠から毎回ランダム。
     // 同じコースが選ばれても開始地点をずらす。
@@ -1499,6 +1613,15 @@ import { AUDIO } from './audio.js?v=20260715-1';
     enterDemo(randomDemoRoute);
     document.getElementById('loading').remove();
     window.__voxDrive = { player, aiCars, start: () => startGame(), inDemo: () => demoActive, mission };
+    document.body.dataset.aiCarCount = String(aiCars.length);
+    document.body.dataset.aiSpeedAverageKmh = aiCars.length
+      ? (aiCars.reduce((sum, ai) => sum + ai.base * 3.6, 0) / aiCars.length).toFixed(1)
+      : '0.0';
+    document.body.dataset.cpuUsesPlayerCar = String(cpuCars.some((car) => {
+      const file = decodeURIComponent(car.url.split('?')[0].split('/').pop() || '').toLowerCase();
+      return RESERVED_VOX_FILES.has(file);
+    }));
+    document.body.dataset.playerTopSpeedKmh = '180';
     requestAnimationFrame(tick);
   }
 
@@ -1671,7 +1794,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
 
   // ------------------------------------------------------------- update ---
   function updatePlayer(dt) {
-    if (demoActive) player.gear = 3;   // デモは2速(~40km/h)でヘアピンをドリフト
+    if (demoActive) player.gear = SUZUKA_MODE ? 5 : 3; // 鈴鹿デモは4速・約100km/h
     // gears
     if (shiftUp) { player.gear = Math.min(player.gear + 1, GEARS.length - 1); shiftUp = false; }
     if (shiftDown) { player.gear = Math.max(player.gear - 1, 0); shiftDown = false; }
@@ -1728,6 +1851,7 @@ import { AUDIO } from './audio.js?v=20260715-1';
     if (gear.acc > 0 && Math.abs(vF) > Math.abs(gear.vmax) && Math.sign(vF) === Math.sign(gear.vmax)) {
       vF += (gear.vmax - vF) * Math.min(1, dt * 1.2);
     }
+    if (vF > PLAYER_TOP_SPEED) vF = PLAYER_TOP_SPEED;
 
     // lateral tyre grip: strong normally, nearly gone while drifting
     vS *= Math.exp(-(player.drifting ? 1.1 : 7.0) * dt);
@@ -1840,7 +1964,8 @@ import { AUDIO } from './audio.js?v=20260715-1';
       ai.heading += clamp(diff, -turn * dt, turn * dt);
 
       // slow down for corners(犯人は減速控えめ)
-      let target = ai.base * (1 - (ai.criminal ? 0.45 : 0.72) * Math.min(1, Math.abs(diff) * 1.4));
+      const cornerSlowdown = ai.cornerSlowdown ?? (ai.criminal ? 0.45 : 0.72);
+      let target = ai.base * (1 - cornerSlowdown * Math.min(1, Math.abs(diff) * 1.4));
       if (ai.criminal) {
         // 逃走車は信号無視。加速はユーザー車の約1.5倍(≈18 m/s^2)に制限。
         const dv = target - ai.v;
@@ -1872,6 +1997,37 @@ import { AUDIO } from './audio.js?v=20260715-1';
   }
 
   function updateCamera(dt) {
+    if (topView) {
+      if (!topViewFrame) {
+        if (mapRoot) {
+          const box = new THREE.Box3().setFromObject(mapRoot);
+          topViewFrame = {
+            center: box.getCenter(new THREE.Vector3()),
+            size: box.getSize(new THREE.Vector3())
+          };
+        } else {
+          topViewFrame = {
+            center: new THREE.Vector3((BOUND_X_MIN + BOUND_X_MAX) * 0.5, 0, 0),
+            size: new THREE.Vector3(BOUND_X_MAX - BOUND_X_MIN, 0, BOUND_Z * 2)
+          };
+        }
+      }
+      const center = topViewFrame.center;
+      const size = topViewFrame.size;
+      const span = Math.max(size.z, size.x / camera.aspect);
+      const height = span / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5))) * 1.12;
+      if (camera.far < height * 1.5) {
+        camera.far = height * 1.5;
+        camera.updateProjectionMatrix();
+      }
+      camera.up.set(0, 0, -1);
+      camera.position.set(center.x, center.y + height, center.z);
+      camera.lookAt(center);
+      sun.position.copy(center).addScaledVector(SUN_DIR, 120);
+      sun.target.position.copy(center);
+      return;
+    }
+    camera.up.set(0, 1, 0);
     if (demoActive) {
       // 20秒に1度、5秒ほどランダムな視点に切り替える
       const t = performance.now();
